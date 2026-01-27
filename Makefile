@@ -43,6 +43,9 @@ SOURCES		:=	source
 DATA		:=	data
 INCLUDES	:=	include
 #ROMFS	:=	romfs
+APP_TITLE   :=  Furmark-NX
+APP_AUTHOR  :=  ClunkerBlunker
+APP_VERSION :=  0.0.1
 
 #---------------------------------------------------------------------------------
 # options for code generation
