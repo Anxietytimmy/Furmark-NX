@@ -7,6 +7,17 @@
 #include <EGL/eglext.h> // EGL extensions
 #include <glad/glad.h>  // glad library (OpenGL loader)
 
+#define GLM_FORCE_PURE
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
+
+#include "stb_image.h"
+#include "fur_png.h"
+
 //-----------------------------------------------------------------------------
 // nxlink support
 //-----------------------------------------------------------------------------
@@ -288,7 +299,7 @@ static const char* const fragmentShaderSource = R"text(
         if (dist < 100.0) {
             vec3 p = ro + dist * rd;
             rotate(p);
-            col = vec3(0.8, 0.4, 0.2);
+            col += triPlanar(u_texture1, p * 1.0, getNormal(p));
         } else {
             float phi = atan(uv.y, uv.x);
             float rho = length(uv) + 0.2;
@@ -355,6 +366,18 @@ static GLuint s_program;
 static GLuint s_vao, s_vbo;
 // needed for shader to render onscreen
 GLint resolutionLoc;
+static GLint s_tex;
+static GLuint u_texture1;
+static GLuint tex1;
+static GLuint tex2;
+static GLuint tex3;
+
+static GLint loc_mdlvMtx, loc_projMtx;
+static GLint loc_lightPos, loc_ambient, loc_diffuse, loc_specular, loc_tex_diffuse;
+static GLint loc_time;
+
+static u64 s_startTicks;
+
 
 static void sceneInit()
 {
@@ -366,6 +389,10 @@ static void sceneInit()
     glAttachShader(s_program, fsh);
     glLinkProgram(s_program);
     resolutionLoc = glGetUniformLocation(s_program, "u_resolution");
+    GLuint tex1Loc = glGetUniformLocation(s_program, "u_texture1");
+    GLint tex2Loc = glGetUniformLocation(s_program, "u_texture2");
+    GLint tex3Loc = glGetUniformLocation(s_program, "u_texture3");
+    loc_time = glGetUniformLocation(s_program, "u_time");
 
     GLint success;
     glGetProgramiv(s_program, GL_LINK_STATUS, &success);
@@ -378,10 +405,21 @@ static void sceneInit()
     glDeleteShader(vsh);
     glDeleteShader(fsh);
 
+    loc_mdlvMtx = glGetUniformLocation(s_program, "mdlvMtx");
+    loc_projMtx = glGetUniformLocation(s_program, "projMtx");
+    loc_lightPos = glGetUniformLocation(s_program, "lightPos");
+    loc_ambient = glGetUniformLocation(s_program, "ambient");
+    loc_diffuse = glGetUniformLocation(s_program, "diffuse");
+    loc_specular = glGetUniformLocation(s_program, "specular");
+    loc_tex_diffuse = glGetUniformLocation(s_program, "tex_diffuse");
+    loc_time = glGetUniformLocation(s_program, "u_time");
+
     struct Vertex
     {
         float position[3];
         float color[3];
+        glm::vec2 texcoord;
+        glm::vec3 normal;
     };
 
     static const Vertex vertices[] =
@@ -405,13 +443,59 @@ static void sceneInit()
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, color));
     glEnableVertexAttribArray(1);
 
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texcoord));
+    glEnableVertexAttribArray(2);
+
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+    glEnableVertexAttribArray(3);
     // note that this is allowed, the call to glVertexAttribPointer registered VBO as the vertex attribute's bound vertex buffer object so afterwards we can safely unbind
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     // You can unbind the VAO afterwards so other VAO calls won't accidentally modify this VAO, but this rarely happens. Modifying other
     // VAOs requires a call to glBindVertexArray anyways so we generally don't unbind VAOs (nor VBOs) when it's not directly necessary.
     glBindVertexArray(0);
+
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    // Textures
+    glGenTextures(1, &tex1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    int width, height, nchan;
+    stbi_set_flip_vertically_on_load(true);
+    stbi_uc* img = stbi_load_from_memory((const stbi_uc*)fur_png, fur_png_size, &width, &height, &nchan, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    stbi_image_free(img);
+
+        // Uniforms
+    glUseProgram(s_program);
+    auto projMtx = glm::perspective(
+        glm::radians(40.0f),
+        1280.0f / 720.0f,
+        0.01f,
+        1000.0f
+    );
+    glUniformMatrix4fv(loc_projMtx, 1, GL_FALSE, glm::value_ptr(projMtx));
+    glUniform4f(loc_lightPos, 0.0f, 0.0f, 0.5f, 1.0f);
+    glUniform3f(loc_ambient, 0.1f, 0.1f, 0.1f);
+    glUniform3f(loc_diffuse, 0.4f, 0.4f, 0.4f);
+    glUniform4f(loc_specular, 0.5f, 0.5f, 0.5f, 20.0f);
+    s_startTicks = armGetSystemTick();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex1);
+    glUniform1i(tex1Loc, 0);
 }
+
+static float getTime()
+    {
+        u64 elapsed = armGetSystemTick() - s_startTicks;
+        return (elapsed * 625 / 12) / 1000000000.0;
+    }
 
 static void sceneRender()
 {
