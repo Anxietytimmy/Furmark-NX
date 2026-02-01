@@ -374,7 +374,7 @@ static GLuint tex3;
 
 static GLint loc_mdlvMtx, loc_projMtx;
 static GLint loc_lightPos, loc_ambient, loc_diffuse, loc_specular, loc_tex_diffuse;
-static GLint loc_time;
+GLint loc_time;
 
 static u64 s_startTicks;
 
@@ -529,7 +529,7 @@ static void sceneInit()
 static float getTime()
     {
         u64 elapsed = armGetSystemTick() - s_startTicks;
-        return (elapsed * 625 / 12) / 1000000000.0;
+        return (elapsed * 625 / 12) / 2000000000.0;
     }
 
 static void sceneRender()
@@ -539,6 +539,8 @@ static void sceneRender()
     // We want as much rendered as possible
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    glUniform1f(loc_time, getTime());
+
 
     // draw our first triangle
     glUseProgram(s_program);
