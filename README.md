@@ -2,7 +2,10 @@
 
 Heavily based off [Furmark by StanislavPetrovV](https://github.com/StanislavPetrovV/FurMark/tree/main})
 
-This project is heavily WIP at the moment. Textures are broken, but the shader is functional. 
+A port of Furmark to the Nintendo Switch. 
+This uses an OpenGL shader to draw as much power as possible.
+As a result, running this for extended perioids will cause hardware damage, so use this at your own risk.
+In its current state, textures and animations for the shader are fully functional. 
+Many other features are planned, including a port to deko3D, UI, path tracing, error detection, benchmarks, multithreading, and shader customization.
 
-Obviously, this does not replace any stability test, as no real error correction is in place yet. 
-This application causes extreme power draw from the GPU, so use with caution. 
+
