@@ -457,31 +457,42 @@ static void sceneInit()
 
     glGenerateMipmap(GL_TEXTURE_2D);
 
-    // Textures
+    int width, height, nchan;
+    stbi_set_flip_vertically_on_load(true);
+
+    //Texture 1
     glGenTextures(1, &tex1);
-    glGenTextures(1, &tex2);
-    glGenTextures(1, &tex3);
-    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex1);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-    int width, height, nchan;
-    stbi_set_flip_vertically_on_load(true);
     stbi_uc* img = stbi_load_from_memory((const stbi_uc*)fur_png, fur_png_size, &width, &height, &nchan, 4);
-    stbi_uc* img1 = stbi_load_from_memory((const stbi_uc*)noise_png, noise_png_size, &width, &height, &nchan, 4);
-    stbi_uc* img2 = stbi_load_from_memory((const stbi_uc*)wall_png, wall_png_size, &width, &height, &nchan, 4);
-
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
-    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, img1);
-    glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA8, width, height, 2, GL_RGBA, GL_UNSIGNED_BYTE, img2);
-
-
     stbi_image_free(img);
-    stbi_image_free(img1);
-    stbi_image_free(img2);
+
+    //Texture 2
+    glGenTextures(1, &tex2);
+    glBindTexture(GL_TEXTURE_2D, tex2);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    img = stbi_load_from_memory((const stbi_uc*)noise_png, noise_png_size, &width, &height, &nchan, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    stbi_image_free(img);
+
+    //Texture 3 
+    // just let me end
+    glGenTextures(1, &tex3);
+    glBindTexture(GL_TEXTURE_2D, tex3);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    img = stbi_load_from_memory((const stbi_uc*)wall_png, wall_png_size, &width, &height, &nchan, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    stbi_image_free(img);
 
         // Uniforms
     glUseProgram(s_program);
@@ -497,6 +508,7 @@ static void sceneInit()
     glUniform3f(loc_diffuse, 0.4f, 0.4f, 0.4f);
     glUniform4f(loc_specular, 0.5f, 0.5f, 0.5f, 20.0f);
     s_startTicks = armGetSystemTick();
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex1);
     glUniform1i(tex1Loc, 0);
@@ -504,12 +516,14 @@ static void sceneInit()
     //Tex 2?
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex2);
-    glUniform1i(tex2Loc, 0);
+    glUniform1i(tex2Loc, 1);
 
-    //Tex 3 try
+    //Tex 3 its 12am
+    // im not here
+    // this isn't happening
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, tex3);
-    glUniform1i(tex3Loc, 0);
+    glUniform1i(tex3Loc, 2);
 }
 
 static float getTime()
