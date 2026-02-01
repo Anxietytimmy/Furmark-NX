@@ -173,6 +173,140 @@ static void deinitEgl()
 }
 
 //-----------------------------------------------------------------------------
+// FPS Counter
+//-----------------------------------------------------------------------------
+
+// Shaders for text rendering
+static const char* const text_vs = R"text(
+    #version 330 core
+    layout(location=0) in vec2 inPos;
+    layout(location=1) in vec3 inColor;
+    out vec3 color;
+    void main() {
+        color = inColor;
+        gl_Position = vec4(inPos, 0.0, 1.0);
+    }
+)text";
+
+static const char* const text_fs = R"text(
+    #version 330 core
+    in vec3 color;
+    out vec4 fragColor;
+    void main() {
+        fragColor = vec4(color, 1.0);
+    }
+)text";
+
+static GLuint s_textProgram = 0;
+static GLuint s_textVao = 0;
+static GLuint s_textVbo = 0;
+
+static const unsigned char font8x8[11][8] = {
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}  // .
+};
+
+static GLuint createAndCompileShader(GLenum type, const char* source);
+
+static void initTextRenderer() {
+    GLuint vsh = createAndCompileShader(GL_VERTEX_SHADER, text_vs);
+    GLuint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, text_fs);
+    
+    s_textProgram = glCreateProgram();
+    glAttachShader(s_textProgram, vsh);
+    glAttachShader(s_textProgram, fsh);
+    glLinkProgram(s_textProgram);
+    glDeleteShader(vsh);
+    glDeleteShader(fsh);
+    
+    glGenVertexArrays(1, &s_textVao);
+    glGenBuffers(1, &s_textVbo);
+}
+
+static void drawTextPixel(float x, float y, float size, float r, float g, float b, float* vertexData, int* offset) {
+    float verts[] = {
+        x, y, r, g, b,
+        x+size, y, r, g, b,
+        x+size, y+size, r, g, b,
+        x, y, r, g, b,
+        x+size, y+size, r, g, b,
+        x, y+size, r, g, b
+    };
+    memcpy(&vertexData[*offset], verts, sizeof(verts));
+    *offset += 30;
+}
+
+static void drawChar(char c, float x, float y, float scale, float r, float g, float b, float* vertexData, int* offset) {
+    int idx = -1;
+    if(c >= '0' && c <= '9') idx = c - '0';
+    else if(c == '.') idx = 10;
+    else return;
+    
+    const unsigned char* glyph = font8x8[idx];
+    for(int row = 0; row < 8; row++) {
+        for(int col = 0; col < 8; col++) {
+            if(glyph[row] & (1 << col)) {
+                float px = x + col * scale;
+                float py = y - row * scale;
+                drawTextPixel(px, py, scale, r, g, b, vertexData, offset);
+            }
+        }
+    }
+}
+
+static void drawText(const char* text, float x, float y, float scale, float r, float g, float b) {
+    float* vertexData = (float*)malloc(100 * 64 * 6 * 5 * sizeof(float));
+    int offset = 0;
+    float cx = x;
+    
+    while(*text) {
+        drawChar(*text, cx, y, scale, r, g, b, vertexData, &offset);
+        cx += 8 * scale;
+        text++;
+    }
+    
+    if(offset > 0) {
+        glUseProgram(s_textProgram);
+        glBindVertexArray(s_textVao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_textVbo);
+        glBufferData(GL_ARRAY_BUFFER, offset * sizeof(float), vertexData, GL_DYNAMIC_DRAW);
+        
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(2*sizeof(float)));
+        glEnableVertexAttribArray(1);
+        
+        glDrawArrays(GL_TRIANGLES, 0, offset / 5);
+    }
+    
+    free(vertexData);
+}
+
+static void cleanupTextRenderer() {
+    if(s_textVbo) {
+        glDeleteBuffers(1, &s_textVbo);
+        s_textVbo = 0;
+    }
+    if(s_textVao) {
+        glDeleteVertexArrays(1, &s_textVao);
+        s_textVao = 0;
+    }
+    if(s_textProgram) {
+        glDeleteProgram(s_textProgram);
+        s_textProgram = 0;
+    }
+}
+
+//-----------------------------------------------------------------------------
 // Main program
 //-----------------------------------------------------------------------------
 
@@ -378,6 +512,12 @@ GLint loc_time;
 
 static u64 s_startTicks;
 
+// FPS counter variables
+static u64 s_lastFrameTime = 0;
+static float s_fps = 0.0f;
+static int s_frameCount = 0;
+static u64 s_fpsUpdateTime = 0;
+
 
 static void sceneInit()
 {
@@ -524,6 +664,14 @@ static void sceneInit()
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, tex3);
     glUniform1i(tex3Loc, 2);
+    
+    // Initialize FPS counter
+    s_lastFrameTime = s_startTicks;
+    s_fpsUpdateTime = s_startTicks;
+    s_frameCount = 0;
+    
+    // Initialize text renderer for FPS display
+    initTextRenderer();
 }
 
 static float getTime()
@@ -534,23 +682,41 @@ static float getTime()
 
 static void sceneRender()
 {
+    // FPS calculation
+    u64 currentTime = armGetSystemTick();
+    s_frameCount++;
+    u64 timeSinceUpdate = currentTime - s_fpsUpdateTime;
+    float secondsSinceUpdate = (timeSinceUpdate * 625.0f / 12.0f) / 1000000000.0f;
+    
+    if(secondsSinceUpdate >= 0.5f) {
+        s_fps = s_frameCount / secondsSinceUpdate;
+        s_frameCount = 0;
+        s_fpsUpdateTime = currentTime;
+    }
+    
     glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     // We want as much rendered as possible
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glUniform1f(loc_time, getTime());
-
 
     // draw our first triangle
     glUseProgram(s_program);
-    glUniform2f(resolutionLoc, 1280.0f, 720.0f); //technically any resolution would work, but 1280x720 is actually visible.
+    glUniform1f(loc_time, getTime());
+    glUniform2f(resolutionLoc, 1280.0f, 720.0f); // technically any resolution would work, but 1280x720 is actually visible.
     glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    
+    // Draw FPS counter
+    glBindVertexArray(0);
+    char fpsText[32];
+    snprintf(fpsText, sizeof(fpsText), "%.1f", s_fps);
+    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 1.0f, 0.0f);
 }
 
 static void sceneExit()
 {
+    cleanupTextRenderer();
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
