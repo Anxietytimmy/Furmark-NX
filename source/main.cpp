@@ -17,6 +17,8 @@
 
 #include "stb_image.h"
 #include "fur_png.h"
+#include "noise_png.h"
+#include "wall_png.h"
 
 //-----------------------------------------------------------------------------
 // nxlink support
@@ -366,8 +368,6 @@ static GLuint s_program;
 static GLuint s_vao, s_vbo;
 // needed for shader to render onscreen
 GLint resolutionLoc;
-static GLint s_tex;
-static GLuint u_texture1;
 static GLuint tex1;
 static GLuint tex2;
 static GLuint tex3;
@@ -390,8 +390,8 @@ static void sceneInit()
     glLinkProgram(s_program);
     resolutionLoc = glGetUniformLocation(s_program, "u_resolution");
     GLuint tex1Loc = glGetUniformLocation(s_program, "u_texture1");
-    GLint tex2Loc = glGetUniformLocation(s_program, "u_texture2");
-    GLint tex3Loc = glGetUniformLocation(s_program, "u_texture3");
+    GLuint tex2Loc = glGetUniformLocation(s_program, "u_texture2");
+    GLuint tex3Loc = glGetUniformLocation(s_program, "u_texture3");
     loc_time = glGetUniformLocation(s_program, "u_time");
 
     GLint success;
@@ -459,6 +459,8 @@ static void sceneInit()
 
     // Textures
     glGenTextures(1, &tex1);
+    glGenTextures(1, &tex2);
+    glGenTextures(1, &tex3);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex1);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -469,8 +471,17 @@ static void sceneInit()
     int width, height, nchan;
     stbi_set_flip_vertically_on_load(true);
     stbi_uc* img = stbi_load_from_memory((const stbi_uc*)fur_png, fur_png_size, &width, &height, &nchan, 4);
+    stbi_uc* img1 = stbi_load_from_memory((const stbi_uc*)noise_png, noise_png_size, &width, &height, &nchan, 4);
+    stbi_uc* img2 = stbi_load_from_memory((const stbi_uc*)wall_png, wall_png_size, &width, &height, &nchan, 4);
+
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, img1);
+    glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA8, width, height, 2, GL_RGBA, GL_UNSIGNED_BYTE, img2);
+
+
     stbi_image_free(img);
+    stbi_image_free(img1);
+    stbi_image_free(img2);
 
         // Uniforms
     glUseProgram(s_program);
@@ -489,6 +500,16 @@ static void sceneInit()
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex1);
     glUniform1i(tex1Loc, 0);
+
+    //Tex 2?
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tex2);
+    glUniform1i(tex2Loc, 0);
+
+    //Tex 3 try
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, tex3);
+    glUniform1i(tex3Loc, 0);
 }
 
 static float getTime()
