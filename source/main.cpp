@@ -413,6 +413,13 @@ static const char* const fragmentShaderSource = R"text(
             q = q * 0.91 + q.yzx * 0.09;
             dist += dot(q, q) * 1e-5;
 
+            // Register stress
+            vec4 r0 = vec4(p, dist);
+            vec4 r1 = sin(r0 * 3.1);
+            vec4 r2 = cos(r1 * 2.7);
+            vec4 r3 = r2 * r1;
+            vec4 r4 = normalize(r3);
+            dist += dot(r4, vec4(1e-5));
 
             if (dist > 100.0 || abs(hit) < 0.0001) break;
         }
