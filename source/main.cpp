@@ -357,7 +357,6 @@ static const char* const fragmentShaderSource = R"text(
     const float PI = 3.1416;
     const float TAU = 2 * PI;
 
-
     float displace(vec3 p, sampler2D tex) {
         float s = 4.5;
         float u = s / TAU * atan(p.y / p.x);
@@ -397,7 +396,7 @@ static const char* const fragmentShaderSource = R"text(
 
     float rayMarch(vec3 ro, vec3 rd) {
         float dist = 0.0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < 48; i++) {
             vec3 p = ro + dist * rd;
 
             rotate(p);
@@ -406,6 +405,14 @@ static const char* const fragmentShaderSource = R"text(
 
             // displace
             dist -= displace(0.5 * p, u_texture2);
+
+            // Saturate FP32
+            vec3 q = p;
+            q = q * 1.37 + 0.13;
+            q = q * q - 0.17;
+            q = q * 0.91 + q.yzx * 0.09;
+            dist += dot(q, q) * 1e-5;
+
 
             if (dist > 100.0 || abs(hit) < 0.0001) break;
         }
@@ -430,6 +437,8 @@ static const char* const fragmentShaderSource = R"text(
 
         vec3 ro = vec3(0, 0, -1.0);
         vec3 rd = normalize(vec3(uv, 1.0));
+
+        // return to normal rendering path
         float dist = rayMarch(ro, rd);
 
         if (dist < 100.0) {
@@ -457,13 +466,11 @@ static const char* const fragmentShaderSource = R"text(
         return col;
     }
 
-
     vec3 renderAAx4() {
         vec4 e = vec4(0.125, -0.125, 0.375, -0.375);
         vec3 colAA = render(e.xz) + render(e.yw) + render(e.wx) + render(e.zy);
         return colAA /= 4.0;
     }
-
 
     void main() {
         vec3 color = renderAAx4();
@@ -647,6 +654,7 @@ static void sceneInit()
     glUniform3f(loc_ambient, 0.1f, 0.1f, 0.1f);
     glUniform3f(loc_diffuse, 0.4f, 0.4f, 0.4f);
     glUniform4f(loc_specular, 0.5f, 0.5f, 0.5f, 20.0f);
+
     s_startTicks = armGetSystemTick();
 
     glActiveTexture(GL_TEXTURE0);
