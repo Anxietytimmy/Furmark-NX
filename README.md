@@ -6,6 +6,6 @@ Heavily based off [Furmark by StanislavPetrovV](https://github.com/StanislavPetr
 - This uses an OpenGL shader to draw as much power as possible.
 - As a result, running this for extended perioids will cause hardware damage, so use this at your own risk.
 - In its current state, textures and animations for the shader are fully functional. 
-- Many other features are planned, including a port to deko3D, UI, path tracing, error detection, benchmarks, multithreading, and shader customization.
+- Many other features are planned, including a port to deko3D, Borealis UI, path tracing, error detection, benchmarks, multithreading, and shader customization.
 
 
