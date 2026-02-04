@@ -19,6 +19,7 @@
 // Include parts
 #include "furmark.h"
 #include "sates.h"
+#include "fmrkRAM.h"
 
 // NX Link Support
 
@@ -198,7 +199,16 @@ int main(int argc,char* argv[]){
                                 state = STATE_FURMARK;
                             }
                             break;
-                        
+
+                        case MENU_FURMARK_RAMBURN:
+                            consoleExit(NULL);
+                            if(initEgl(nwindowGetDefault())) {
+                                gladLoadGL();
+                                frRamSceneInit();
+                                state = STATE_FURMARK_RB;
+                            }
+                            break;
+
                         case MENU_EXIT:
                             goto exit_app;
                         
@@ -222,12 +232,34 @@ int main(int argc,char* argv[]){
                 }
                 break;
             }
+
+            case STATE_FURMARK_RB: {
+                if(kDown & HidNpadButton_B) {
+                    frRamExit();
+                    deinitEgl();
+                    consoleInit(NULL);
+                    drawMenu(selectedItem);
+                    state = STATE_MENU;
+                } else {
+                    frRamRender();
+                    eglSwapBuffers(s_display, s_surface);
+                }
+                break;
+                }
+
+
+
+
+            }
         }
-    }
+    
 
  exit_app:
     if(state == STATE_FURMARK) {
         frExit();
+        deinitEgl();
+    } else if(state == STATE_FURMARK_RB) {
+        frRamExit();
         deinitEgl();
     }
 
