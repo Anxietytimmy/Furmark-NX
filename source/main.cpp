@@ -20,6 +20,7 @@
 #include "furmark.h"
 #include "sates.h"
 #include "fmrkRAM.h"
+#include "GPUPT.H"
 
 // NX Link Support
 
@@ -80,7 +81,7 @@ static void drawMenu(int selected) {
     consoleClear();
     printf("\x1b[1;31m");
     printf("\x1b[2;10H===============================================");
-    printf("\x1b[3;10H                Furmark-NX v0.2.0                    ");
+    printf("\x1b[3;10H                Furmark-NX v0.4.0                    ");
     printf("\x1b[4;10H===============================================");
     printf("\x1b[0m");
     
@@ -93,7 +94,6 @@ static void drawMenu(int selected) {
     }
     
     printf("\x1b[20;10H B - Back, + - Exit. Use DPAD/LStick to navigate");
-
 
     consoleUpdate(NULL);
 }
@@ -209,6 +209,15 @@ int main(int argc,char* argv[]){
                             }
                             break;
 
+                        case MENU_GPU_PT:
+                            consoleExit(NULL);
+                            if(initEgl(nwindowGetDefault())) {
+                                gladLoadGL();
+                                GPUPTSceneInit();
+                                state = STATE_GPU_PT;
+                            }
+                            break;
+
                         case MENU_EXIT:
                             goto exit_app;
                         
@@ -246,7 +255,21 @@ int main(int argc,char* argv[]){
                 }
                 break;
                 }
+            
+            case STATE_GPU_PT: {
+                if(kDown &HidNpadButton_B){
+                    GPUPTExit();
+                    deinitEgl();
+                    consoleInit(NULL);
+                    drawMenu(selectedItem);
+                    state = STATE_MENU;
+                } else {
+                    GPUPTRender();
+                    eglSwapBuffers(s_display, s_surface);
 
+                }
+
+            }
 
 
 

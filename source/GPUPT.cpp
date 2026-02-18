@@ -1,0 +1,815 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <switch.h>
+
+#include <EGL/egl.h>    // EGL library
+#include <EGL/eglext.h> // EGL extensions
+#include <glad/glad.h>  // glad library (OpenGL loader)
+
+#define GLM_FORCE_PURE
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
+
+#include "stb_image.h"
+#include "fur_png.h"
+#include "noise_png.h"
+#include "wall_png.h"
+#include "sates.h"
+
+//-----------------------------------------------------------------------------
+// nxlink support
+//-----------------------------------------------------------------------------
+
+#ifndef ENABLE_NXLINK
+#define TRACE(fmt,...) ((void)0)
+#else
+#include <unistd.h>
+#define TRACE(fmt,...) printf("%s: " fmt "\n", __PRETTY_FUNCTION__, ## __VA_ARGS__)
+
+static int s_nxlinkSock = -1;
+
+static void initNxLink()
+{
+    if (R_FAILED(socketInitializeDefault()))
+        return;
+
+    s_nxlinkSock = nxlinkStdio();
+    if (s_nxlinkSock >= 0)
+        TRACE("printf output now goes to nxlink server");
+    else
+        socketExit();
+}
+
+static void deinitNxLink()
+{
+    if (s_nxlinkSock >= 0)
+    {
+        close(s_nxlinkSock);
+        socketExit();
+        s_nxlinkSock = -1;
+    }
+}
+
+extern "C" void userAppInit()
+{
+    initNxLink();
+}
+
+extern "C" void userAppExit()
+{
+    deinitNxLink();
+}
+
+#endif
+
+//-----------------------------------------------------------------------------
+// EGL initialization
+//-----------------------------------------------------------------------------
+
+
+
+static EGLDisplay s_display;
+static EGLContext s_context;
+static EGLSurface s_surface;
+
+static bool initEgl(NWindow* win)
+{
+    // Connect to the EGL default display
+    s_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (!s_display)
+    {
+        TRACE("Could not connect to display! error: %d", eglGetError());
+        goto _fail0;
+    }
+
+    // Initialize the EGL display connection
+    eglInitialize(s_display, nullptr, nullptr);
+
+    // Select OpenGL (Core) as the desired graphics API
+    if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE)
+    {
+        TRACE("Could not set API! error: %d", eglGetError());
+        goto _fail1;
+    }
+
+    // Get an appropriate EGL framebuffer configuration
+    EGLConfig config;
+    EGLint numConfigs;
+    static const EGLint framebufferAttributeList[] =
+    {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE,     8,
+        EGL_GREEN_SIZE,   8,
+        EGL_BLUE_SIZE,    8,
+        EGL_ALPHA_SIZE,   8,
+        EGL_DEPTH_SIZE,   24,
+        EGL_STENCIL_SIZE, 8,
+        EGL_NONE
+    };
+    eglChooseConfig(s_display, framebufferAttributeList, &config, 1, &numConfigs);
+    if (numConfigs == 0)
+    {
+        TRACE("No config found! error: %d", eglGetError());
+        goto _fail1;
+    }
+
+    // Create an EGL window surface
+    s_surface = eglCreateWindowSurface(s_display, config, win, nullptr);
+    if (!s_surface)
+    {
+        TRACE("Surface creation failed! error: %d", eglGetError());
+        goto _fail1;
+    }
+
+    // Create an EGL rendering context
+    static const EGLint contextAttributeList[] =
+    {
+        EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
+        EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
+        EGL_CONTEXT_MINOR_VERSION_KHR, 3,
+        EGL_NONE
+    };
+    s_context = eglCreateContext(s_display, config, EGL_NO_CONTEXT, contextAttributeList);
+    if (!s_context)
+    {
+        TRACE("Context creation failed! error: %d", eglGetError());
+        goto _fail2;
+    }
+
+    // Connect the context to the surface
+    eglMakeCurrent(s_display, s_surface, s_surface, s_context);
+    return true;
+
+_fail2:
+    eglDestroySurface(s_display, s_surface);
+    s_surface = nullptr;
+_fail1:
+    eglTerminate(s_display);
+    s_display = nullptr;
+_fail0:
+    return false;
+}
+
+static void deinitEgl()
+{
+    if (s_display)
+    {
+        eglMakeCurrent(s_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (s_context)
+        {
+            eglDestroyContext(s_display, s_context);
+            s_context = nullptr;
+        }
+        if (s_surface)
+        {
+            eglDestroySurface(s_display, s_surface);
+            s_surface = nullptr;
+        }
+        eglTerminate(s_display);
+        s_display = nullptr;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// FPS Counter
+//-----------------------------------------------------------------------------
+
+// Shaders for text rendering
+static const char* const text_vs = R"text(
+    #version 330 core
+    layout(location=0) in vec2 inPos;
+    layout(location=1) in vec3 inColor;
+    out vec3 color;
+    void main() {
+        color = inColor;
+        gl_Position = vec4(inPos, 0.0, 1.0);
+    }
+)text";
+
+static const char* const text_fs = R"text(
+    #version 330 core
+    in vec3 color;
+    out vec4 fragColor;
+    void main() {
+        fragColor = vec4(color, 1.0);
+    }
+)text";
+
+static GLuint s_textProgram = 0;
+static GLuint s_textVao = 0;
+static GLuint s_textVbo = 0;
+
+static const unsigned char font8x8[11][8] = {
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}  // .
+};
+
+static GLuint createAndCompileShader(GLenum type, const char* source);
+
+static void initTextRenderer() {
+    GLuint vsh = createAndCompileShader(GL_VERTEX_SHADER, text_vs);
+    GLuint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, text_fs);
+    
+    s_textProgram = glCreateProgram();
+    glAttachShader(s_textProgram, vsh);
+    glAttachShader(s_textProgram, fsh);
+    glLinkProgram(s_textProgram);
+    glDeleteShader(vsh);
+    glDeleteShader(fsh);
+    
+    glGenVertexArrays(1, &s_textVao);
+    glGenBuffers(1, &s_textVbo);
+}
+
+static void drawTextPixel(float x, float y, float size, float r, float g, float b, float* vertexData, int* offset) {
+    float verts[] = {
+        x, y, r, g, b,
+        x+size, y, r, g, b,
+        x+size, y+size, r, g, b,
+        x, y, r, g, b,
+        x+size, y+size, r, g, b,
+        x, y+size, r, g, b
+    };
+    memcpy(&vertexData[*offset], verts, sizeof(verts));
+    *offset += 30;
+}
+
+static void drawChar(char c, float x, float y, float scale, float r, float g, float b, float* vertexData, int* offset) {
+    int idx = -1;
+    if(c >= '0' && c <= '9') idx = c - '0';
+    else if(c == '.') idx = 10;
+    else return;
+    
+    const unsigned char* glyph = font8x8[idx];
+    for(int row = 0; row < 8; row++) {
+        for(int col = 0; col < 8; col++) {
+            if(glyph[row] & (1 << col)) {
+                float px = x + col * scale;
+                float py = y - row * scale;
+                drawTextPixel(px, py, scale, r, g, b, vertexData, offset);
+            }
+        }
+    }
+}
+
+static void drawText(const char* text, float x, float y, float scale, float r, float g, float b) {
+    float* vertexData = (float*)malloc(100 * 64 * 6 * 5 * sizeof(float));
+    int offset = 0;
+    float cx = x;
+    
+    while(*text) {
+        drawChar(*text, cx, y, scale, r, g, b, vertexData, &offset);
+        cx += 8 * scale;
+        text++;
+    }
+    
+    if(offset > 0) {
+        glUseProgram(s_textProgram);
+        glBindVertexArray(s_textVao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_textVbo);
+        glBufferData(GL_ARRAY_BUFFER, offset * sizeof(float), vertexData, GL_DYNAMIC_DRAW);
+        
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(2*sizeof(float)));
+        glEnableVertexAttribArray(1);
+        
+        glDrawArrays(GL_TRIANGLES, 0, offset / 5);
+    }
+    
+    free(vertexData);
+}
+
+static void cleanupTextRenderer() {
+    if(s_textVbo) {
+        glDeleteBuffers(1, &s_textVbo);
+        s_textVbo = 0;
+    }
+    if(s_textVao) {
+        glDeleteVertexArrays(1, &s_textVao);
+        s_textVao = 0;
+    }
+    if(s_textProgram) {
+        glDeleteProgram(s_textProgram);
+        s_textProgram = 0;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Main program
+//-----------------------------------------------------------------------------
+
+static void setMesaConfig()
+{
+    // Uncomment below to disable error checking and save CPU time (useful for production):
+    //setenv("MESA_NO_ERROR", "1", 1);
+
+    // Uncomment below to enable Mesa logging:
+    setenv("EGL_LOG_LEVEL", "debug", 1);
+    setenv("MESA_VERBOSE", "all", 1);
+    setenv("NOUVEAU_MESA_DEBUG", "1", 1);
+
+    // Uncomment below to enable shader debugging in Nouveau:
+    setenv("NV50_PROG_OPTIMIZE", "0", 1);
+    setenv("NV50_PROG_DEBUG", "1", 1);
+    setenv("NV50_PROG_CHIPSET", "0x120", 1);
+}
+    // vertex shader just to get anything on screen
+static const char* const vertexShaderSource = R"text(
+    #version 330 core
+
+    layout (location = 0) in vec2 aPos;
+
+    void main()
+    {
+        // aPos should be in range [-1, 1]
+        gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+)text";
+
+    //Pathtracing shader
+static const char* const fragmentShaderSource = R"text(
+    #version 330 core
+    // Alright so originally this was supposed to be a way more complex shader
+    // It was supposed to be a proceduraly generated path tracing scene
+    // Unfortunately, my stupidity knows no bounds, and well over 5000 lines in I decided that I was better off waterboarding myself
+    // To anyone who even wants to ask, no you don't want to see the original, it was a fucking war crime
+    // Ask Adam why he thought it was a good idea to copy entire libraries into this shit, and then acted surprised when it didn't work
+    // so, have a cornel box instead, because I cannot be fucked to make a proper shader file loader, despite needing one soon anyway.
+
+    out vec4 fragColor;
+
+    uniform vec2 u_resolution;
+    uniform float u_time;
+    
+
+    // --------------------------------------------------
+    // MATERIAL IDS
+    // --------------------------------------------------
+
+    #define WHITE 0
+    #define RED 1
+    #define GREEN 2
+    #define LIGHT 3
+    #define MIRROR 4
+
+    struct Hit {
+        float dist;
+        int material;
+    };
+
+    // --------------------------------------------------
+    // RANDOM
+    // --------------------------------------------------
+
+    float hash(vec2 p){
+        return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);
+    }
+
+    vec3 rand3(vec3 p){
+        return vec3(
+            hash(p.xy),
+            hash(p.yz),
+            hash(p.zx)
+        ) * 2.0 - 1.0;
+    }
+
+    // --------------------------------------------------
+    // SPHERE SDF
+    // --------------------------------------------------
+
+    float sdSphere(vec3 p, float r){
+        return length(p) - r;
+    }
+
+    // --------------------------------------------------
+    // SCENE MAP (Cornell Box)
+    // --------------------------------------------------
+
+    Hit map(vec3 p)
+    {
+        Hit h;
+        h.dist = 1e9;
+        h.material = WHITE;
+
+        // ---------- mirror sphere ----------
+        float s = sdSphere(p - vec3(0,0.6,0), 0.6);
+        if(s < h.dist){
+            h.dist = s;
+            h.material = MIRROR;
+        }
+
+        // ---------- room walls (inward planes) ----------
+
+        // left (red)
+        float left = p.x + 2.0;
+        if(left < h.dist){
+            h.dist = left;
+            h.material = RED;
+        }
+
+        // right (green)
+        float right = 2.0 - p.x;
+        if(right < h.dist){
+            h.dist = right;
+            h.material = GREEN;
+        }
+
+        // floor
+        float floor = p.y;
+        if(floor < h.dist){
+            h.dist = floor;
+            h.material = WHITE;
+        }
+
+        // ceiling
+        float ceil = 4.0 - p.y;
+        if(ceil < h.dist){
+            h.dist = ceil;
+            h.material = WHITE;
+        }
+
+        // back wall
+        float back = 2.0 - p.z;
+        if(back < h.dist){
+            h.dist = back;
+            h.material = WHITE;
+        }
+
+        // ---------- ceiling light ----------
+        vec3 lp = p - vec3(0, 3.99, 0);
+        float light = max(abs(lp.x)-0.7, abs(lp.z)-0.7);
+
+        if(light < h.dist){
+            h.dist = light;
+            h.material = LIGHT;
+        }
+
+        return h;
+    }
+
+    // --------------------------------------------------
+    // RAYMARCH
+    // --------------------------------------------------
+
+    Hit raymarch(vec3 ro, vec3 rd)
+    {
+        float t = 0.0;
+
+        for(int i=0;i<100;i++){
+            vec3 p = ro + rd*t;
+            Hit h = map(p);
+
+            if(h.dist < 0.001){
+                h.dist = t;
+                return h;
+            }
+
+            t += h.dist;
+            if(t > 50.0) break;
+        }
+
+        Hit miss;
+        miss.dist = -1.0;
+        return miss;
+    }
+
+    // --------------------------------------------------
+    // NORMAL FROM SDF
+    // --------------------------------------------------
+
+    vec3 getNormal(vec3 p)
+    {
+        float e = 0.001;
+        return normalize(vec3(
+            map(p+vec3(e,0,0)).dist - map(p-vec3(e,0,0)).dist,
+            map(p+vec3(0,e,0)).dist - map(p-vec3(0,e,0)).dist,
+            map(p+vec3(0,0,e)).dist - map(p-vec3(0,0,e)).dist
+        ));
+    }
+
+    // --------------------------------------------------
+    // MATERIAL COLORS
+    // --------------------------------------------------
+
+    vec3 getColor(int m){
+        if(m==RED) return vec3(1,0.2,0.2);
+        if(m==GREEN) return vec3(0.2,1,0.2);
+        return vec3(0.9);
+    }
+
+    bool isLight(int m){ return m==LIGHT; }
+    bool isMirror(int m){ return m==MIRROR; }
+
+    // --------------------------------------------------
+    // PATH TRACE
+    // --------------------------------------------------
+
+    vec3 trace(vec3 ro, vec3 rd)
+    {
+        vec3 color = vec3(0);
+        vec3 throughput = vec3(1);
+
+        for(int bounce=0; bounce<5; bounce++)
+        {
+            Hit h = raymarch(ro, rd);
+
+            // sky fallback
+            if(h.dist < 0.0){
+                color += throughput * vec3(0.7,0.8,1.0);
+                break;
+            }
+
+            vec3 pos = ro + rd*h.dist;
+            vec3 n = getNormal(pos);
+
+            // hit light
+            if(isLight(h.material)){
+                color += throughput * vec3(15.0);
+                break;
+            }
+
+            // mirror bounce
+            if(isMirror(h.material)){
+                rd = reflect(rd, n);
+            }
+            else{
+                // diffuse bounce (hemisphere)
+                vec3 r = rand3(pos + float(bounce));
+                rd = normalize(n + r);
+                if(dot(rd,n) < 0.0) rd = -rd;
+
+                throughput *= getColor(h.material);
+            }
+
+            ro = pos + n*0.001;
+        }
+
+        return color;
+    }
+
+    // --------------------------------------------------
+    // CAMERA + MAIN
+    // --------------------------------------------------
+
+    void main()
+    {
+        vec2 p = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+        p.x *= u_resolution.x / u_resolution.y;
+
+        // camera
+        vec3 ro = vec3(0,2,-6);
+        vec3 target = vec3(0,2,0);
+
+        vec3 forward = normalize(target - ro);
+        vec3 right = normalize(cross(forward, vec3(0,1,0)));
+        vec3 up = cross(right, forward);
+
+        vec3 rd = normalize(forward + p.x*right + p.y*up);
+
+        vec3 col = trace(ro, rd);
+
+        // simple gamma
+        col = pow(col, vec3(0.4545));
+
+        fragColor = vec4(col,1);
+    }
+)text";
+
+static GLuint s_program;
+static GLuint s_vao, s_vbo;
+// needed for shader to render onscreen
+static GLint resolutionLoc;
+static GLuint mouseLoc;
+
+static GLint loc_mdlvMtx, loc_projMtx;
+static GLint loc_time;
+
+static u64 s_startTicks;
+
+// FPS counter variables
+static u64 s_lastFrameTime = 0;
+static float s_fps = 0.0f;
+static int s_frameCount = 0;
+static u64 s_fpsUpdateTime = 0;
+
+// This code makes me feel the following emotions
+static GLuint createAndCompileShader(GLenum type, const char* source)
+{
+    GLint success;
+    GLchar msg[512];
+
+    GLuint handle = glCreateShader(type);
+    if (!handle)
+    {
+        TRACE("%u: cannot create shader", type);
+        return 0;
+    }
+    glShaderSource(handle, 1, &source, nullptr);
+    glCompileShader(handle);
+    glGetShaderiv(handle, GL_COMPILE_STATUS, &success);
+
+    if (!success)
+    {
+        glGetShaderInfoLog(handle, sizeof(msg), nullptr, msg);
+        TRACE("%u: %s\n", type, msg);
+        glDeleteShader(handle);
+        return 0;
+    }
+
+    return handle;
+}
+
+// I have no idea what the hell I meant by that, I wrote that on a bender
+void GPUPTSceneInit()
+{
+    GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, vertexShaderSource);
+    GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+    if(!vsh || !fsh) {
+    TRACE("Shader compile failed — aborting");
+    return;
+    }
+
+    s_program = glCreateProgram();
+    glViewport(0, 0, 1280, 720);
+    glAttachShader(s_program, vsh);
+    glAttachShader(s_program, fsh);
+    glBindFragDataLocation(s_program, 0, "fragColor");
+    glLinkProgram(s_program);
+    resolutionLoc = glGetUniformLocation(s_program, "u_resolution");
+    loc_time = glGetUniformLocation(s_program, "u_time");
+    mouseLoc = glGetUniformLocation(s_program, "u_mouse");
+
+    GLint success;
+    glGetProgramiv(s_program, GL_LINK_STATUS, &success);
+    if (!success)
+    {
+        char buf[512];
+        glGetProgramInfoLog(s_program, sizeof(buf), nullptr, buf);
+        TRACE("Link error: %s", buf);
+    }
+    glDeleteShader(vsh);
+    glDeleteShader(fsh);
+
+    loc_mdlvMtx = glGetUniformLocation(s_program, "mdlvMtx");
+    loc_projMtx = glGetUniformLocation(s_program, "projMtx");
+    loc_time = glGetUniformLocation(s_program, "u_time");
+    mouseLoc = glGetUniformLocation(s_program, "u_mouse");
+
+    static float vertices[] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f,
+    };
+        
+
+
+    glGenVertexArrays(1, &s_vao);
+    glGenBuffers(1, &s_vbo);
+    // bind the Vertex Array Object first, then bind and set vertex buffer(s), and then configure vertex attributes(s).
+    glBindVertexArray(s_vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+
+    // note that this is allowed, the call to glVertexAttribPointer registered VBO as the vertex attribute's bound vertex buffer object so afterwards we can safely unbind
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // You can unbind the VAO afterwards so other VAO calls won't accidentally modify this VAO, but this rarely happens. Modifying other
+    // VAOs requires a call to glBindVertexArray anyways so we generally don't unbind VAOs (nor VBOs) when it's not directly necessary.
+    glBindVertexArray(0);
+
+        // Uniforms
+    glUseProgram(s_program);
+    auto projMtx = glm::perspective(
+        glm::radians(40.0f),
+        1280.0f / 720.0f,
+        0.01f,
+        1000.0f
+    );
+    glUniformMatrix4fv(loc_projMtx, 1, GL_FALSE, glm::value_ptr(projMtx));
+    glUniform2f(mouseLoc, 1.0f, 1.0);
+
+    s_startTicks = armGetSystemTick();
+    
+    // Initialize FPS counter
+    s_lastFrameTime = s_startTicks;
+    s_fpsUpdateTime = s_startTicks;
+    s_frameCount = 0;
+    
+    // Initialize text renderer for FPS display
+    initTextRenderer();
+}
+float getTime2()
+    {
+        u64 elapsed = armGetSystemTick() - s_startTicks;
+        return (elapsed * 625 / 12) / 2000000000.0;
+    }
+
+void GPUPTRender()
+{
+    // FPS calculation
+    u64 currentTime = armGetSystemTick();
+    s_frameCount++;
+    u64 timeSinceUpdate = currentTime - s_fpsUpdateTime;
+    float secondsSinceUpdate = (timeSinceUpdate * 625.0f / 12.0f) / 1000000000.0f;
+    
+    if(secondsSinceUpdate >= 0.5f) {
+        s_fps = s_frameCount / secondsSinceUpdate;
+        s_frameCount = 0;
+        s_fpsUpdateTime = currentTime;
+    }
+    
+    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // We want as much rendered as possible
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    // draw our first triangle
+    glUseProgram(s_program);
+    glUniform1f(loc_time, getTime2());
+    glUniform2f(mouseLoc, 1.0f, 1.0f);
+    glUniform2f(resolutionLoc, 1280.0f, 720.0f); // technically any resolution would work, but 1280x720 is actually visible.
+    glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    
+    // Draw FPS counter
+    glBindVertexArray(0);
+    char fpsText[32];
+    snprintf(fpsText, sizeof(fpsText), "%.1f", s_fps);
+    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 1.0f, 0.0f);
+}
+
+void GPUPTExit()
+{
+    cleanupTextRenderer();
+    glDeleteBuffers(1, &s_vbo);
+    glDeleteVertexArrays(1, &s_vao);
+    glDeleteProgram(s_program);
+}
+
+int GPUPTMain(int argc, char* argv[])
+{
+    // Set mesa configuration (useful for debugging)
+    setMesaConfig();
+
+    // Initialize EGL on the default window
+    if (!initEgl(nwindowGetDefault()))
+        return EXIT_FAILURE;
+
+    // Load OpenGL routines using glad
+    gladLoadGL();
+
+    // Initialize our scene
+    GPUPTSceneInit();
+
+    // Configure our supported input layout: a single player with standard controller styles
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+
+    // Initialize the default gamepad (which reads handheld mode inputs as well as the first connected controller)
+    PadState pad;
+    padInitializeDefault(&pad);
+
+    // Main graphics loop
+    while (appletMainLoop())
+    {
+        // Get and process input
+        padUpdate(&pad);
+        u32 kDown = padGetButtonsDown(&pad);
+        if (kDown & HidNpadButton_B) {
+            state = STATE_MENU;
+            return 0;
+        }
+            
+
+        // Render stuff!
+        GPUPTRender();
+        eglSwapBuffers(s_display, s_surface);
+    }
+
+    // Deinitialize our scene
+    GPUPTExit();
+
+    // Deinitialize EGL
+    deinitEgl();
+    return EXIT_SUCCESS;
+}
