@@ -331,13 +331,17 @@ static void setMesaConfig()
     // vertex shader just to get anything on screen
 static const char* const vertexShaderSource = R"text(
     #version 330 core
-
-    layout (location = 0) in vec2 aPos;
+    out vec2 uv;
 
     void main()
     {
-        // aPos should be in range [-1, 1]
-        gl_Position = vec4(aPos, 0.0, 1.0);
+        vec2 pos = vec2(
+            (gl_VertexID == 2) ? 3.0 : -1.0,
+            (gl_VertexID == 1) ? 3.0 : -1.0
+        );
+
+        uv = 0.5 * (pos + 1.0);
+        gl_Position = vec4(pos, 0.0, 1.0);
     }
 )text";
 
@@ -351,11 +355,15 @@ static const char* const fragmentShaderSource = R"text(
     // Ask Adam why he thought it was a good idea to copy entire libraries into this shit, and then acted surprised when it didn't work
     // so, have a cornel box instead, because I cannot be fucked to make a proper shader file loader, despite needing one soon anyway.
 
+    in vec2 uv;
     out vec4 fragColor;
 
     uniform vec2 u_resolution;
     uniform float u_time;
     
+    // Sampler variables
+    uniform int u_frame;
+    uniform sampler2D u_prevFrame;
 
     // --------------------------------------------------
     // MATERIAL IDS
@@ -381,10 +389,12 @@ static const char* const fragmentShaderSource = R"text(
     }
 
     vec3 rand3(vec3 p){
+        float f = float(u_frame);
+
         return vec3(
-            hash(p.xy),
-            hash(p.yz),
-            hash(p.zx)
+            hash(p.xy + f),
+            hash(p.yz + f*1.37),
+            hash(p.zx + f*2.17)
         ) * 2.0 - 1.0;
     }
 
@@ -451,7 +461,7 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         // ---------- ceiling light ----------
-        vec3 lp = p - vec3(0, 3.99, 0);
+        vec3 lp = p - vec3(0, 4.8, 0);
         float light = max(abs(lp.x)-0.7, abs(lp.z)-0.7);
 
         if(light < h.dist){
@@ -539,7 +549,7 @@ static const char* const fragmentShaderSource = R"text(
 
             // hit light
             if(isLight(h.material)){
-                color += throughput * vec3(15.0);
+                color += throughput * vec3(1.2);
                 break;
             }
 
@@ -549,29 +559,33 @@ static const char* const fragmentShaderSource = R"text(
             }
             else{
                 // diffuse bounce (hemisphere)
-                vec3 r = rand3(pos + float(bounce));
+                vec3 r = rand3(pos + float(bounce) + float(u_frame));
                 rd = normalize(n + r);
-                if(dot(rd,n) < 0.0) rd = -rd;
+                // cosine weighting (energy can only be transfered)
+                // I mean if you want to change this sure, but you'll get flashbanged.
 
-                throughput *= getColor(h.material);
+                float cosTheta = max(dot(rd, n), 0.0);
+
+                throughput *= getColor(h.material) * cosTheta;
             }
 
             ro = pos + n*0.001;
         }
 
+        // Clamp color values so we don't get a concussion simulator
+        color = min(color, vec3(1.0));    
         return color;
     }
 
-    // --------------------------------------------------
-    // CAMERA + MAIN
-    // --------------------------------------------------
 
-    void main()
+    // Sampler Pathtracing 
+    vec3 pathTrace(vec2 uv)
     {
-        vec2 p = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+        // convert uv to screen space values
+        vec2 p = uv * 2.0 - 1.0;
         p.x *= u_resolution.x / u_resolution.y;
 
-        // camera
+        // Camera setup
         vec3 ro = vec3(0,2,-6);
         vec3 target = vec3(0,2,0);
 
@@ -581,12 +595,34 @@ static const char* const fragmentShaderSource = R"text(
 
         vec3 rd = normalize(forward + p.x*right + p.y*up);
 
-        vec3 col = trace(ro, rd);
+        // Add pixel jittering to reduce noise
+        vec2 jitter = vec2(
+            hash(gl_FragCoord.xy + float(u_frame)),
+            hash(gl_FragCoord.yx + float(u_frame))
+        ) / u_resolution;
+        
+        return trace(ro, rd + vec3(jitter, 00));
+    }
 
-        // simple gamma
-        col = pow(col, vec3(0.4545));
+    // Main
+    void main()
+    {
+        //setup output
+        vec2 uv = gl_FragCoord.xy / u_resolution;
+        vec3 newSample = pathTrace(uv);
 
-        fragColor = vec4(col,1);
+        // Accumulation
+        vec3 prev = texture(u_prevFrame, gl_FragCoord.xy / u_resolution).rgb;
+        vec3 accumulated;
+
+        if(u_frame == 0)
+            accumulated = newSample;
+        else
+            accumulated = (prev *float(u_frame) + newSample) / float(u_frame + 1);
+
+
+        // Output final pixels, send to vertex
+        fragColor = vec4(accumulated, 1.0);
     }
 )text";
 
@@ -594,7 +630,6 @@ static GLuint s_program;
 static GLuint s_vao, s_vbo;
 // needed for shader to render onscreen
 static GLint resolutionLoc;
-static GLuint mouseLoc;
 
 static GLint loc_mdlvMtx, loc_projMtx;
 static GLint loc_time;
@@ -606,6 +641,13 @@ static u64 s_lastFrameTime = 0;
 static float s_fps = 0.0f;
 static int s_frameCount = 0;
 static u64 s_fpsUpdateTime = 0;
+
+// Accumulation variables
+static GLuint tex[2], fbo[2];
+static GLuint frameLoc, prevframeLoc;
+static int frame = 0;
+
+
 
 // This code makes me feel the following emotions
 static GLuint createAndCompileShader(GLenum type, const char* source)
@@ -650,9 +692,11 @@ void GPUPTSceneInit()
     glAttachShader(s_program, fsh);
     glBindFragDataLocation(s_program, 0, "fragColor");
     glLinkProgram(s_program);
+
+    frameLoc = glGetUniformLocation(s_program, "u_frame");
+    prevframeLoc = glGetUniformLocation(s_program, "u_prevFrame");
     resolutionLoc = glGetUniformLocation(s_program, "u_resolution");
     loc_time = glGetUniformLocation(s_program, "u_time");
-    mouseLoc = glGetUniformLocation(s_program, "u_mouse");
 
     GLint success;
     glGetProgramiv(s_program, GL_LINK_STATUS, &success);
@@ -668,7 +712,6 @@ void GPUPTSceneInit()
     loc_mdlvMtx = glGetUniformLocation(s_program, "mdlvMtx");
     loc_projMtx = glGetUniformLocation(s_program, "projMtx");
     loc_time = glGetUniformLocation(s_program, "u_time");
-    mouseLoc = glGetUniformLocation(s_program, "u_mouse");
 
     static float vertices[] = {
         -1.0f, -1.0f,
@@ -676,7 +719,26 @@ void GPUPTSceneInit()
         -1.0f,  3.0f,
     };
         
+    // Textures used by sampler, effectively, just the previous frame
+    glGenTextures(2, tex);
+    glGenFramebuffers(2, fbo);
+    // Pass samples
+    for(int i=0;i<2;i++)
+    {
+        // Generate texture
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1280, 720, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
+        // Framebuffer setup
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+
+        // Clear accumulation textures so we don't add garbage into results
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
 
     glGenVertexArrays(1, &s_vao);
     glGenBuffers(1, &s_vbo);
@@ -689,6 +751,8 @@ void GPUPTSceneInit()
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
+    // enable SRGB because god knows I am too lazy to gamma correct at 2am
+    glEnable(GL_FRAMEBUFFER_SRGB);
 
     // note that this is allowed, the call to glVertexAttribPointer registered VBO as the vertex attribute's bound vertex buffer object so afterwards we can safely unbind
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -706,7 +770,6 @@ void GPUPTSceneInit()
         1000.0f
     );
     glUniformMatrix4fv(loc_projMtx, 1, GL_FALSE, glm::value_ptr(projMtx));
-    glUniform2f(mouseLoc, 1.0f, 1.0);
 
     s_startTicks = armGetSystemTick();
     
@@ -726,6 +789,9 @@ float getTime2()
 
 void GPUPTRender()
 {
+    static int X = 0;
+    static int Y = 1;
+
     // FPS calculation
     u64 currentTime = armGetSystemTick();
     s_frameCount++;
@@ -747,16 +813,47 @@ void GPUPTRender()
     // draw our first triangle
     glUseProgram(s_program);
     glUniform1f(loc_time, getTime2());
-    glUniform2f(mouseLoc, 1.0f, 1.0f);
     glUniform2f(resolutionLoc, 1280.0f, 720.0f); // technically any resolution would work, but 1280x720 is actually visible.
     glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
+        
+    // Read previous frame
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex[X]);
+    glUniform1i(prevframeLoc, 0);
+    glUniform1i(frameLoc, frame);
+
+    // Render 1st buffer
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo[Y]);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    
+
+    // Draw FB, config
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[Y]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBlitFramebuffer(0, 0, 1280, 720, 0, 0, 1280, 720, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    // If frame = 0 (ie a new run), we clear the framebuffer to prevent brightness issues
+    if(frame == 0)
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo[X]);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+
+    // Cleanup
+    std::swap(X, Y);
+    frame++;
+
     // Draw FPS counter
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.1f", s_fps);
-    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 1.0f, 0.0f);
+    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+
+    // Draw number of samples
+    char sampleText[64];
+    snprintf(sampleText, sizeof(sampleText), "Samples: %d", frame);
+    drawText(sampleText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 }
 
 void GPUPTExit()
@@ -765,6 +862,7 @@ void GPUPTExit()
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
+    frame = 0;
 }
 
 int GPUPTMain(int argc, char* argv[])
