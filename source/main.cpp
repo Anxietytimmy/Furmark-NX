@@ -80,20 +80,20 @@ static const MenuEntry s_menuEntries[MENU_COUNT] = {
 static void drawMenu(int selected) {
     consoleClear();
     printf("\x1b[1;31m");
-    printf("\x1b[2;10H===============================================");
-    printf("\x1b[3;10H                Furmark-NX v0.4.1                    ");
-    printf("\x1b[4;10H===============================================");
+    printf("\x1b[2;15H===============================================");
+    printf("\x1b[3;15H                Furmark-NX v0.4.1                    ");
+    printf("\x1b[4;15H===============================================");
     printf("\x1b[0m");
     
     for(int i = 0; i < MENU_COUNT; i++) {
         printf("\x1b[1;31m");
-        printf("\x1b[%d;15H", s_menuEntries[i].row);
+        printf("\x1b[%d;20H", s_menuEntries[i].row);
         if(selected == i) printf("\x1b[7m");
         printf("> %s", s_menuEntries[i].label);
         if(selected == i) printf("\x1b[0m");
     }
     
-    printf("\x1b[20;10H B - Back, + - Exit. Use DPAD/LStick to navigate");
+    printf("\x1b[20;15H B - Back, + - Exit. Use DPAD/LStick to navigate");
 
     consoleUpdate(NULL);
 }
