@@ -81,7 +81,7 @@ static void drawMenu(int selected) {
     consoleClear();
     printf("\x1b[1;31m");
     printf("\x1b[2;15H===============================================");
-    printf("\x1b[3;15H                Furmark-NX v0.4.1                    ");
+    printf("\x1b[3;15H                Furmark-NX v0.4.2                    ");
     printf("\x1b[4;15H===============================================");
     printf("\x1b[0m");
     

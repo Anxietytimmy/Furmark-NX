@@ -747,7 +747,7 @@ void frRamRender()
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.1f", s_fps);
-    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 1.0f, 0.0f);
+    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 }
 
 void frRamExit()

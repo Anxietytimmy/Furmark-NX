@@ -417,7 +417,7 @@ static const char* const fragmentShaderSource = R"text(
         h.material = WHITE;
 
         // ---------- mirror sphere ----------
-        float s = sdSphere(p - vec3(0,0.6,0), 0.6);
+        float s = sdSphere(p - vec3(0,1.0,-0.5), 1.0);
         if(s < h.dist){
             h.dist = s;
             h.material = MIRROR;
@@ -461,8 +461,11 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         // ---------- ceiling light ----------
-        vec3 lp = p - vec3(0, 4.8, 0);
-        float light = max(abs(lp.x)-0.7, abs(lp.z)-0.7);
+        vec3 lCenter = vec3(0.0, 3.98, -1.2);
+        vec3 lSize = vec3(0.9, 0.01, 0.9); 
+
+        vec3 d = abs(p - lCenter) - lSize;
+        float light = length(max(d,0.0)) + min(max(d.x,max(d.y,d.z)),0.0);
 
         if(light < h.dist){
             h.dist = light;
@@ -480,7 +483,7 @@ static const char* const fragmentShaderSource = R"text(
     {
         float t = 0.0;
 
-        for(int i=0;i<100;i++){
+        for(int i=0;i<80;i++){
             vec3 p = ro + rd*t;
             Hit h = map(p);
 
@@ -549,7 +552,7 @@ static const char* const fragmentShaderSource = R"text(
 
             // hit light
             if(isLight(h.material)){
-                color += throughput * vec3(1.2);
+                color += throughput * vec3(12.0);
                 break;
             }
 
@@ -573,7 +576,6 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         // Clamp color values so we don't get a concussion simulator
-        color = min(color, vec3(1.0));    
         return color;
     }
 
