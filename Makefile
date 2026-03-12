@@ -45,7 +45,7 @@ INCLUDES	:=	include
 #ROMFS	:=	romfs
 APP_TITLE   :=  Furmark-NX
 APP_AUTHOR  :=  ClunkerBlunker
-APP_VERSION :=  0.4.2
+APP_VERSION :=  0.5.0
 
 #---------------------------------------------------------------------------------
 # options for code generation

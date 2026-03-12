@@ -2,6 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <switch.h>
+#include <vector>
+#include <cmath>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+
+
 
 #include <EGL/egl.h>    // EGL library
 #include <EGL/eglext.h> // EGL extensions
@@ -10,6 +18,7 @@
 #define GLM_FORCE_PURE
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <glm/glm.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -21,7 +30,6 @@
 #include "wall_png.h"
 #include "sates.h"
 
-//-----------------------------------------------------------------------------
 // nxlink support
 //-----------------------------------------------------------------------------
 
@@ -309,10 +317,6 @@ static void cleanupTextRenderer() {
     }
 }
 
-//-----------------------------------------------------------------------------
-// Main program
-//-----------------------------------------------------------------------------
-
 static void setMesaConfig()
 {
     // Uncomment below to disable error checking and save CPU time (useful for production):
@@ -328,8 +332,31 @@ static void setMesaConfig()
     setenv("NV50_PROG_DEBUG", "1", 1);
     setenv("NV50_PROG_CHIPSET", "0x120", 1);
 }
-    // vertex shader just to get anything on screen
-static const char* const vertexShaderSource = R"text(
+
+// FPS counter variables
+static u64 s_startTicks = 0;
+static u64 s_lastFrameTime = 0;
+static float s_fps = 0.0f;
+static int s_frameCount = 0;
+static u64 s_fpsUpdateTime = 0;
+
+static int frame = 0;
+static float getTime(){ return ((armGetSystemTick()-s_startTicks)*625.0f/12.0f)/1000000000.0f; }
+
+struct Sphere{
+    glm::vec3 center;
+    float radius;
+    int material;
+};
+
+static Sphere* s_spheres = nullptr;
+static uint32_t* s_framebuffer = nullptr;
+static GLuint s_rtTexture = 0;
+static GLuint s_rtVao = 0;
+static GLuint s_rtVbo = 0;
+static GLuint s_rtProgram = 0;
+
+static const char* const rt_vs = R"text(
     #version 330 core
     out vec2 uv;
 
@@ -345,287 +372,17 @@ static const char* const vertexShaderSource = R"text(
     }
 )text";
 
-    //Pathtracing shader
-static const char* const fragmentShaderSource = R"text(
-    #version 330 core
-    // Alright so originally this was supposed to be a way more complex shader
-    // It was supposed to be a proceduraly generated path tracing scene
-    // Unfortunately, my stupidity knows no bounds, and well over 5000 lines in I decided that I was better off waterboarding myself
-    // To anyone who even wants to ask, no you don't want to see the original, it was a fucking war crime
-    // Ask Adam why he thought it was a good idea to copy entire libraries into this shit, and then acted surprised when it didn't work
-    // so, have a cornel box instead, because I cannot be fucked to make a proper shader file loader, despite needing one soon anyway.
+static const char* const rt_fs = R"text(
+#version 330 core
 
-    in vec2 uv;
-    out vec4 fragColor;
+in vec2 uv; 
+out vec4 fragColor;
 
-    uniform vec2 u_resolution;
-    uniform float u_time;
-    
-    // Sampler variables
-    uniform int u_frame;
-    uniform sampler2D u_prevFrame;
+uniform sampler2D screenTex;
 
-    // --------------------------------------------------
-    // MATERIAL IDS
-    // --------------------------------------------------
-
-    #define WHITE 0
-    #define RED 1
-    #define GREEN 2
-    #define LIGHT 3
-    #define MIRROR 4
-
-    struct Hit {
-        float dist;
-        int material;
-    };
-
-    // --------------------------------------------------
-    // RANDOM
-    // --------------------------------------------------
-
-    float hash(vec2 p){
-        return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);
-    }
-
-    vec3 rand3(vec3 p){
-        float f = float(u_frame);
-
-        return vec3(
-            hash(p.xy + f),
-            hash(p.yz + f*1.37),
-            hash(p.zx + f*2.17)
-        ) * 2.0 - 1.0;
-    }
-
-    // --------------------------------------------------
-    // SPHERE SDF
-    // --------------------------------------------------
-
-    float sdSphere(vec3 p, float r){
-        return length(p) - r;
-    }
-
-    // --------------------------------------------------
-    // SCENE MAP (Cornell Box)
-    // --------------------------------------------------
-
-    Hit map(vec3 p)
-    {
-        Hit h;
-        h.dist = 1e9;
-        h.material = WHITE;
-
-        // ---------- mirror sphere ----------
-        float s = sdSphere(p - vec3(0,1.0,-0.5), 1.0);
-        if(s < h.dist){
-            h.dist = s;
-            h.material = MIRROR;
-        }
-
-        // ---------- room walls (inward planes) ----------
-
-        // left (red)
-        float left = p.x + 2.0;
-        if(left < h.dist){
-            h.dist = left;
-            h.material = RED;
-        }
-
-        // right (green)
-        float right = 2.0 - p.x;
-        if(right < h.dist){
-            h.dist = right;
-            h.material = GREEN;
-        }
-
-        // floor
-        float floor = p.y;
-        if(floor < h.dist){
-            h.dist = floor;
-            h.material = WHITE;
-        }
-
-        // ceiling
-        float ceil = 4.0 - p.y;
-        if(ceil < h.dist){
-            h.dist = ceil;
-            h.material = WHITE;
-        }
-
-        // back wall
-        float back = 2.0 - p.z;
-        if(back < h.dist){
-            h.dist = back;
-            h.material = WHITE;
-        }
-
-        // ---------- ceiling light ----------
-        vec3 lCenter = vec3(0.0, 3.98, -1.2);
-        vec3 lSize = vec3(0.9, 0.01, 0.9); 
-
-        vec3 d = abs(p - lCenter) - lSize;
-        float light = length(max(d,0.0)) + min(max(d.x,max(d.y,d.z)),0.0);
-
-        if(light < h.dist){
-            h.dist = light;
-            h.material = LIGHT;
-        }
-
-        return h;
-    }
-
-    // --------------------------------------------------
-    // RAYMARCH
-    // --------------------------------------------------
-
-    Hit raymarch(vec3 ro, vec3 rd)
-    {
-        float t = 0.0;
-
-        for(int i=0;i<80;i++){
-            vec3 p = ro + rd*t;
-            Hit h = map(p);
-
-            if(h.dist < 0.001){
-                h.dist = t;
-                return h;
-            }
-
-            t += h.dist;
-            if(t > 50.0) break;
-        }
-
-        Hit miss;
-        miss.dist = -1.0;
-        return miss;
-    }
-
-    // --------------------------------------------------
-    // NORMAL FROM SDF
-    // --------------------------------------------------
-
-    vec3 getNormal(vec3 p)
-    {
-        float e = 0.001;
-        return normalize(vec3(
-            map(p+vec3(e,0,0)).dist - map(p-vec3(e,0,0)).dist,
-            map(p+vec3(0,e,0)).dist - map(p-vec3(0,e,0)).dist,
-            map(p+vec3(0,0,e)).dist - map(p-vec3(0,0,e)).dist
-        ));
-    }
-
-    // --------------------------------------------------
-    // MATERIAL COLORS
-    // --------------------------------------------------
-
-    vec3 getColor(int m){
-        if(m==RED) return vec3(1,0.2,0.2);
-        if(m==GREEN) return vec3(0.2,1,0.2);
-        return vec3(0.9);
-    }
-
-    bool isLight(int m){ return m==LIGHT; }
-    bool isMirror(int m){ return m==MIRROR; }
-
-    // --------------------------------------------------
-    // PATH TRACE
-    // --------------------------------------------------
-
-    vec3 trace(vec3 ro, vec3 rd)
-    {
-        vec3 color = vec3(0);
-        vec3 throughput = vec3(1);
-
-        for(int bounce=0; bounce<3; bounce++)
-        {
-            Hit h = raymarch(ro, rd);
-
-            // sky fallback
-            if(h.dist < 0.0){
-                color += throughput * vec3(0.7,0.8,1.0);
-                break;
-            }
-
-            vec3 pos = ro + rd*h.dist;
-            vec3 n = getNormal(pos);
-
-            // hit light
-            if(isLight(h.material)){
-                color += throughput * vec3(12.0);
-                break;
-            }
-
-            // mirror bounce
-            if(isMirror(h.material)){
-                rd = reflect(rd, n);
-            }
-            else{
-                // diffuse bounce (hemisphere)
-                vec3 r = rand3(pos + float(bounce) + float(u_frame));
-                rd = normalize(n + r);
-                // cosine weighting (energy can only be transfered)
-                // I mean if you want to change this sure, but you'll get flashbanged.
-
-                float cosTheta = max(dot(rd, n), 0.0);
-
-                throughput *= getColor(h.material) * cosTheta;
-            }
-
-            ro = pos + n*0.001;
-        }
-
-        // Clamp color values so we don't get a concussion simulator
-        return color;
-    }
-
-
-    // Sampler Pathtracing 
-    vec3 pathTrace(vec2 uv)
-    {
-        // convert uv to screen space values
-        vec2 p = uv * 2.0 - 1.0;
-        p.x *= u_resolution.x / u_resolution.y;
-
-        // Camera setup
-        vec3 ro = vec3(0,2,-6);
-        vec3 target = vec3(0,2,0);
-
-        vec3 forward = normalize(target - ro);
-        vec3 right = normalize(cross(forward, vec3(0,1,0)));
-        vec3 up = cross(right, forward);
-
-        vec3 rd = normalize(forward + p.x*right + p.y*up);
-
-        // Add pixel jittering to reduce noise
-        vec2 jitter = vec2(
-            hash(gl_FragCoord.xy + float(u_frame)),
-            hash(gl_FragCoord.yx + float(u_frame))
-        ) / u_resolution;
-        
-        return trace(ro, rd + vec3(jitter, 00));
-    }
-
-    // Main
-    void main()
-    {
-        //setup output
-        vec2 uv = gl_FragCoord.xy / u_resolution;
-        vec3 newSample = pathTrace(uv);
-
-        // Accumulation
-        vec3 prev = texture(u_prevFrame, gl_FragCoord.xy / u_resolution).rgb;
-        vec3 accumulated;
-
-        if(u_frame == 0)
-            accumulated = newSample;
-        else
-            accumulated = (prev *float(u_frame) + newSample) / float(u_frame + 1);
-
-
-        // Output final pixels, send to vertex
-        fragColor = vec4(accumulated, 1.0);
-    }
+void main(){
+    fragColor = texture(screenTex, uv);
+}
 )text";
 
 static GLuint s_program;
@@ -636,22 +393,12 @@ static GLint resolutionLoc;
 static GLint loc_mdlvMtx, loc_projMtx;
 static GLint loc_time;
 
-static u64 s_startTicks;
-
-// FPS counter variables
-static u64 s_lastFrameTime = 0;
-static float s_fps = 0.0f;
-static int s_frameCount = 0;
-static u64 s_fpsUpdateTime = 0;
 
 // Accumulation variables
 static GLuint tex[2], fbo[2];
 static GLuint frameLoc, prevframeLoc;
-static int frame = 0;
 
 
-
-// This code makes me feel the following emotions
 static GLuint createAndCompileShader(GLenum type, const char* source)
 {
     GLint success;
@@ -678,11 +425,316 @@ static GLuint createAndCompileShader(GLenum type, const char* source)
     return handle;
 }
 
-// I have no idea what the hell I meant by that, I wrote that on a bender
-void GPUPTSceneInit()
+
+using namespace glm;
+
+// CPUPT fun
+int width = 1280;
+int height = 720;
+
+static std::vector<glm::vec3> cpuAccum;
+static std::vector<glm::vec3> cpuFrame;
+static GLuint screenTex;
+
+
+// needed vars
+vec2 u_resolution(width, height);
+float u_time;
+int u_frame;
+std::vector<vec3> prevFrame(width * height);
+
+// Vars for multithreading
+static const int THREAD_COUNT = 3;
+
+static std::thread workers[THREAD_COUNT];
+static std::atomic<bool> running(true);
+static std::atomic<int> tilesDone(0);
+
+static std::mutex workMutex;
+static std::condition_variable workCV;
+
+static bool workReady = false;
+static int currentFrame = 0;
+
+std::atomic<bool> cpuRenderRunning(false);
+
+enum Material{
+    WHITE,
+    RED,
+    GREEN,
+    LIGHT,
+    MIRROR
+};
+
+
+struct Hit {
+    float t;
+    Material mat;
+    vec3 normal;
+};
+
+// Random
+inline float randFloat(uint32_t& state)
 {
-    GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, vertexShaderSource);
-    GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+
+    return (state & 0xFFFFFF) / float(0xFFFFFF);
+}
+
+// Sphere SDF
+bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float r, float& t)
+{
+    vec3 oc = ro - center;
+
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - r*r;
+    float h = b*b - c;
+
+    if(h < 0.0f) return false;
+
+    h = sqrtf(h);
+    t = -b - h;
+
+    if(t < 0) t = -b + h;
+
+    return t > 0;
+}
+// Scene
+Hit intersectScene(vec3 ro, vec3 rd)
+{
+    Hit best;
+    best.t = 1e30f;
+    best.mat = WHITE;
+
+    float t;
+
+    const float eps = 1e-6f;
+
+    // mirror sphere
+    if(intersectSphere(ro,rd,vec3(0,1,-0.5f),1.0f,t))
+    {
+        if(t < best.t)
+        {
+            best.t = t;
+            best.mat = MIRROR;
+            vec3 p = ro + rd*t;
+            best.normal = normalize(p - vec3(0,1,-0.5f));
+        }
+    }
+
+    // left wall
+    if (fabs(rd.x) > eps) {
+        t = (-2.0f - ro.x) / rd.x;
+        if(t>0 && t<best.t) {
+            best.t = t;
+            best.mat = RED;
+            best.normal = vec3(1,0,0);
+        }
+    }
+
+    // right wall
+    if (fabs(rd.x) > eps) {
+        t = (2.0f - ro.x) / rd.x;
+        if(t>0 && t<best.t) {
+            best.t = t;
+            best.mat = GREEN;
+            best.normal = vec3(-1,0,0);
+        }
+    }
+
+    // floor
+    if (fabs(rd.y) > eps) {
+        t = (0.0f - ro.y) / rd.y;
+        if(t>0 && t<best.t) {
+            best.t = t;
+            best.mat = WHITE;
+            best.normal = vec3(0,1,0);
+        }
+    }
+
+    // ceiling
+    if (fabs(rd.y) > eps) {
+        t = (4.0f - ro.y) / rd.y;
+        if(t>0 && t<best.t) {
+            vec3 hit = ro + rd * t;
+
+            if(fabs(hit.x) < 1.0f && fabs(hit.z) < 1.0f)
+                best.mat = LIGHT;
+            else
+                best.mat = WHITE;
+
+            best.t = t;
+            best.normal = vec3(0,-1,0);
+        }
+    }
+
+    // back wall
+    if (fabs(rd.z) > eps) {
+        t = (2.0f - ro.z) / rd.z;
+        if(t>0 && t<best.t) {
+            best.t = t;
+            best.mat = WHITE;
+            best.normal = vec3(0,0,-1);
+        }
+    }
+
+    if(best.t < 1e29f)
+        return best;
+
+    best.t = -1.0f;
+    return best;
+}
+
+
+// Material colors
+vec3 getColor(Material m){
+    if(m == RED) return vec3(1, 0.2, 0.2);
+    if(m == GREEN) return vec3(0.2, 1.0, 0.2);
+    return vec3(0.9);
+}
+
+bool isLight(int m){ return m == LIGHT; }
+bool isMirror(int m){ return m == MIRROR;}
+
+vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
+{
+    vec3 color(0);
+    vec3 throughput(1);
+
+    for(int bounce=0; bounce<3; bounce++)
+    {
+        Hit h = intersectScene(ro,rd);
+
+        if(h.t < 0)
+        {
+            color += throughput * vec3(0.7,0.8,1.0);
+            break;
+        }
+
+        vec3 pos = ro + rd*h.t;
+        vec3 n = h.normal;
+
+        // ceiling light
+        if(h.mat == LIGHT)
+        {
+            color += throughput * vec3(12.0f);
+            break;
+        }
+
+        if(h.mat == MIRROR)
+        {
+            rd = reflect(rd,n);
+        }
+        else
+        {
+            vec3 r = normalize(vec3(
+                randFloat(rng) * 2.0f - 1.0f,
+                randFloat(rng) * 2.0f - 1.0f,
+                randFloat(rng) * 2.0f - 1.0f
+            ));
+
+            if(dot(r, n) < 0.0f) r = -r;
+
+            rd = normalize(n + r);
+
+            float cosTheta = max(dot(rd,n),0.0f);
+            throughput *= getColor(h.mat);
+        }
+
+        ro = pos + n * 0.001f;
+    }
+
+    return color;
+}
+
+static vec3 camForward;
+static vec3 camRight;
+static vec3 camUp;
+static vec3 camPos;
+
+
+// Denoising sampler
+vec3 cpuPathTrace(float uvx, float uvy, float px, float py){
+    // convert uv values to screen space
+    float pxn = uvx * 2.0f - 1.0f;
+    float pyn = uvy * 2.0f - 1.0f;
+
+    pxn *= width / float(height);
+
+    vec2 p(pxn, pyn);
+
+    // Camera setup
+    vec3 ro = vec3(0, 2, -6);
+    vec3 target = vec3(0, 2, 0);
+
+    vec3 rd = normalize(camForward + p.x * camRight + p.y * camUp);
+
+    uint32_t rng = uint32_t(px) * 1973u ^ uint32_t(py) * 9277u ^ uint32_t(frame) * 26699u | 1u;
+
+    return trace(ro, rd, rng);
+
+}
+
+int frameIndex = frame;
+
+
+// Multithreading is silly
+void renderTile(int startY, int endY, int frameIndex)
+{
+    float invW = 1.0f / width;
+    float invH = 1.0f / height;
+
+    for(int y = startY; y < endY; y++){
+    if(!cpuRenderRunning) return;
+    for(int x = 0; x < width; x++)
+    {
+        float px = x + 0.5f;
+        float py = y + 0.5f;
+
+        float uvx = px * invW;
+        float uvy = py * invH;
+
+        glm::vec3 sample = cpuPathTrace(uvx, uvy, px, py);
+
+        sample = glm::clamp(sample, glm::vec3(0.0f), glm::vec3(50.0f));
+
+        int i = y * width + x;
+
+        cpuAccum[i] += (sample - cpuAccum[i]) / float(frame + 1);
+        cpuFrame[i] = cpuAccum[i];
+    }
+}
+}
+
+// What the hell is cache
+void workerThread(int id)
+{
+    int tileHeight = height / THREAD_COUNT;
+
+    while(running)
+    {
+        std::unique_lock<std::mutex> lock(workMutex);
+        workCV.wait(lock, []{ return workReady || !running; });
+
+        if(!running) return;
+
+        int startY = id * tileHeight;
+        int endY = (id == THREAD_COUNT - 1) ? height : startY + tileHeight;
+
+        lock.unlock();
+
+        renderTile(startY, endY, currentFrame);
+
+        tilesDone++;
+    }
+}
+
+
+void CPURTSceneinit(){
+    GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, rt_vs);
+    GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, rt_fs);
     if(!vsh || !fsh) {
     TRACE("Shader compile failed — aborting");
     return;
@@ -694,6 +746,7 @@ void GPUPTSceneInit()
     glAttachShader(s_program, fsh);
     glBindFragDataLocation(s_program, 0, "fragColor");
     glLinkProgram(s_program);
+
 
     frameLoc = glGetUniformLocation(s_program, "u_frame");
     prevframeLoc = glGetUniformLocation(s_program, "u_prevFrame");
@@ -729,7 +782,7 @@ void GPUPTSceneInit()
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1280, 720, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -782,15 +835,66 @@ void GPUPTSceneInit()
     
     // Initialize text renderer for FPS display
     initTextRenderer();
+
+    running = true;
+    cpuRenderRunning = false;
+    tilesDone = 0;
+    workReady = false;
+
+    for(int i = 0; i < THREAD_COUNT; i++)
+    {
+        workers[i] = std::thread(workerThread, i);
+    }
+
+
+    // Setup CPU for output
+    cpuAccum.resize(width * height, glm::vec3(0.0f));
+    cpuFrame.resize(width * height);
+
+
+    glGenTextures(1, &screenTex);
+    glBindTexture(GL_TEXTURE_2D, screenTex);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
 }
-float getTime2()
+
+glm::vec3 cpuPathTrace(glm::vec2 uv, glm::vec2 fragCoord);
+
+
+// How did we get here
+// Heat Stroke Struck
+// Hell yeah death
+void renderCPUFrame()
+{
+    cpuRenderRunning = true;
+    tilesDone = 0;
+    currentFrame = frame;
+
+    {
+        std::lock_guard<std::mutex> lock(workMutex);
+        workReady = true;
+    }
+
+    workCV.notify_all();
+
+    while(tilesDone < THREAD_COUNT)
+        std::this_thread::yield();
+
+    workReady = false;
+}
+
+float getTime3()
     {
         u64 elapsed = armGetSystemTick() - s_startTicks;
         return (elapsed * 625 / 12) / 2000000000.0;
     }
 
-void GPUPTRender()
-{
+
+void CPURTRender(){
     static int X = 0;
     static int Y = 1;
 
@@ -805,45 +909,43 @@ void GPUPTRender()
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;
     }
-    
+
     glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     // We want as much rendered as possible
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
+    camPos = vec3(0,2,-6);
+    vec3 target = vec3(0,2,0);
+
+    camForward = normalize(target - camPos);
+    camRight = normalize(cross(camForward, vec3(0,1,0)));
+    camUp = cross(camRight, camForward);
+
+    // draw CPU functions
+    renderCPUFrame();
+
+    glBindTexture(GL_TEXTURE_2D, screenTex);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, cpuFrame.data());
+
+
     // draw our first triangle
     glUseProgram(s_program);
-    glUniform1f(loc_time, getTime2());
-    glUniform2f(resolutionLoc, 1280.0f, 720.0f); // technically any resolution would work, but 1280x720 is actually visible.
+    glUniform1f(loc_time, getTime3());
+    glUniform2f(resolutionLoc, width, height); 
     glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
         
-    // Read previous frame
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex[X]);
-    glUniform1i(prevframeLoc, 0);
-    glUniform1i(frameLoc, frame);
+    glBindTexture(GL_TEXTURE_2D, screenTex);
 
-    // Render 1st buffer
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo[Y]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+    // Triangles, placed in your mind
+    // You will never be free
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    // Draw FB, config
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[Y]);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, 1280, 720, 0, 0, 1280, 720, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-    // If frame = 0 (ie a new run), we clear the framebuffer to prevent brightness issues
-    if(frame == 0)
-    {
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo[X]);
-        glClearColor(0, 0, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-
-
-    // Cleanup
-    std::swap(X, Y);
     frame++;
 
     // Draw FPS counter
@@ -858,18 +960,28 @@ void GPUPTRender()
     drawText(sampleText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 }
 
-void GPUPTExit()
+void CPURTExit()
 {
+    cpuRenderRunning = false;
+    running = false;
+    workCV.notify_all();
+
+    for(int i = 0; i < THREAD_COUNT; i++){
+        if(workers[i].joinable())
+            workers[i].join();
+    }
     cleanupTextRenderer();
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
-    frame = 0;
+
+    cpuAccum.clear();
+    cpuFrame.clear();
+    frame = 0; 
 }
 
-int GPUPTMain(int argc, char* argv[])
-{
-    // Set mesa configuration (useful for debugging)
+int CPURTMain(int argc, char* argv[]){
+        // Set mesa configuration (useful for debugging)
     setMesaConfig();
 
     // Initialize EGL on the default window
@@ -880,7 +992,7 @@ int GPUPTMain(int argc, char* argv[])
     gladLoadGL();
 
     // Initialize our scene
-    GPUPTSceneInit();
+    CPURTSceneinit();
 
     // Configure our supported input layout: a single player with standard controller styles
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -902,12 +1014,12 @@ int GPUPTMain(int argc, char* argv[])
             
 
         // Render stuff!
-        GPUPTRender();
+        CPURTRender();
         eglSwapBuffers(s_display, s_surface);
     }
 
     // Deinitialize our scene
-    GPUPTExit();
+    CPURTExit();
 
     // Deinitialize EGL
     deinitEgl();
