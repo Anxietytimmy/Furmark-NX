@@ -349,8 +349,6 @@ struct Sphere{
     int material;
 };
 
-static Sphere* s_spheres = nullptr;
-static uint32_t* s_framebuffer = nullptr;
 
 static const char* const rt_vs = R"text(
     #version 330 core
@@ -663,7 +661,6 @@ vec3 cpuPathTrace(float uvx, float uvy, float px, float py){
 
     // Camera setup
     vec3 ro = vec3(0, 2, -6);
-    vec3 target = vec3(0, 2, 0);
 
     vec3 rd = normalize(camForward + p.x * camRight + p.y * camUp);
 
@@ -891,8 +888,6 @@ float getTime3()
 
 
 void CPURTRender(){
-    static int X = 0;
-    static int Y = 1;
 
     // FPS calculation
     u64 currentTime = armGetSystemTick();
