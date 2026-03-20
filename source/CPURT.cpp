@@ -351,10 +351,6 @@ struct Sphere{
 
 static Sphere* s_spheres = nullptr;
 static uint32_t* s_framebuffer = nullptr;
-static GLuint s_rtTexture = 0;
-static GLuint s_rtVao = 0;
-static GLuint s_rtVbo = 0;
-static GLuint s_rtProgram = 0;
 
 static const char* const rt_vs = R"text(
     #version 330 core
