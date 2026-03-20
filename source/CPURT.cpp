@@ -341,7 +341,6 @@ static int s_frameCount = 0;
 static u64 s_fpsUpdateTime = 0;
 
 static int frame = 0;
-static float getTime(){ return ((armGetSystemTick()-s_startTicks)*625.0f/12.0f)/1000000000.0f; }
 
 struct Sphere{
     glm::vec3 center;
@@ -426,8 +425,11 @@ using namespace glm;
 int width = 1280;
 int height = 720;
 
+// Save accumulation as vectors, fallback
 static std::vector<glm::vec3> cpuAccum;
 static std::vector<glm::vec3> cpuFrame;
+
+
 static GLuint screenTex;
 
 
@@ -633,7 +635,6 @@ vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
 
             rd = normalize(n + r);
 
-            float cosTheta = max(dot(rd,n),0.0f);
             throughput *= getColor(h.mat);
         }
 
@@ -695,6 +696,7 @@ void renderTile(int startY, int endY, int frameIndex)
 
         int i = y * width + x;
 
+        // old accumulation, fallback
         cpuAccum[i] += (sample - cpuAccum[i]) / float(frame + 1);
         cpuFrame[i] = cpuAccum[i];
     }
