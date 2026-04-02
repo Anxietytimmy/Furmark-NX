@@ -483,6 +483,8 @@ static const char* const fragmentShaderSource = R"text(
     {
         float t = 0.0;
 
+        // 80 steps, lower values give better performance, while higher values increase load
+        // increasing load beyond this only decreases power draw, while lowering results in graphical glitches
         for(int i=0;i<80;i++){
             vec3 p = ro + rd*t;
             Hit h = map(p);
@@ -537,6 +539,8 @@ static const char* const fragmentShaderSource = R"text(
         vec3 color = vec3(0);
         vec3 throughput = vec3(1);
 
+        // Controls the amount of bounces made by rays in the scene
+        // reduced to 3 for parody with CPU mode
         for(int bounce=0; bounce<3; bounce++)
         {
             Hit h = raymarch(ro, rd);
