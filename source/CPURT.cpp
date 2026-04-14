@@ -377,7 +377,6 @@ static GLint loc_time;
 
 // Accumulation variables
 static GLuint tex[2], fbo[2];
-static GLuint frameLoc;
 
 
 static GLuint createAndCompileShader(GLenum type, const char* source)
@@ -892,9 +891,9 @@ void trace4(
             };
 
             if(h.mat == LIGHT){
-                color[i].x += throughput[i].x * 12.0f;
-                color[i].y += throughput[i].y * 12.0f;
-                color[i].z += throughput[i].z * 12.0f;
+                color[i].x += throughput[i].x * 6.0f;
+                color[i].y += throughput[i].y * 6.0f;
+                color[i].z += throughput[i].z * 6.0f;
                 continue;
             }      
             if(h.mat == MIRROR)
@@ -996,13 +995,6 @@ int frameIndex = frame;
 // Multithreading is silly
 void renderTile(int startY, int endY, int frameIndex)
 {
-    float invW = 1.0f / width;
-    float invH = 1.0f / height;
-
-    // Average of frames
-    float invFrame = 1.0f / float(currentFrame + 1);
-
-
     for(int y = startY; y < endY; y++){
 
     if(!cpuRenderRunning) return;
