@@ -738,6 +738,8 @@ void frRamRender()
 
     // draw our first triangle
     glUseProgram(s_program);
+    // (Idk, Wtf, X, Y)
+    glViewport(0, 0, 1280, 720);
     glUniform1f(loc_time, getTime1());
     glUniform2f(resolutionLoc, 640.0f, 360.0f); // Lower to 360p to increase ram accesses
     glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
