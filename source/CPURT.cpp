@@ -948,13 +948,19 @@ static vec3f camPos;
 // Scalar ray compute
 inline vec3f computeRay(float x, float y)
 {
-    float uvx = x / float(width);
-    float uvy = y / float(height);
+    float uvx = (x + 0.5f) / float(width);
+    float uvy = (y + 0.5f) / float(height);
+
+    float px = uvx * 2.0f - 1.0f;
+    float py = uvy * 2.0f - 1.0f;
+
+    float aspect = float(width) / float(height);
+    px *= aspect;  
 
     return normalize(
         camForward +
-        camRight * (uvx * 2.0f - 1.0f) +
-        camUp    * (uvy * 2.0f - 1.0f)
+        camRight * px +
+        camUp    * py
     );
 }
 
