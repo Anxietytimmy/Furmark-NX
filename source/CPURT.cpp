@@ -8,6 +8,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <arm_neon.h>
+#include <cstdlib>
 
 #include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -375,7 +377,7 @@ static GLint loc_time;
 
 // Accumulation variables
 static GLuint tex[2], fbo[2];
-static GLuint frameLoc, prevframeLoc;
+static GLuint frameLoc;
 
 
 static GLuint createAndCompileShader(GLenum type, const char* source)
@@ -416,7 +418,6 @@ static GLuint screenTex;
 
 // needed vars
 float u_time;
-int u_frame;
 
 // Vars for multithreading
 static const int THREAD_COUNT = 3;
@@ -462,8 +463,58 @@ struct vec2f {
 
 vec2f u_resolution(width, height);
 
+// I FUCKING LOVE XENON BULBS NEON HELL YEAHHHH
+// In full non shitpost fashion, NEON needs 128bit SIMD, or 4x  F32 lanes
+// V3F below works for scalars, but for this we need more functinos
+// -------------------------------
+// V E C 3 X 4 N E O N
+// -------------------------------
+struct vec3x4 {
+    float32x4_t x, y, z;
+};
+
+// NEON Dot product
+inline float32x4_t dot(const vec3x4& a, const vec3x4& b){
+    return vmlaq_f32(vmlaq_f32(vmulq_f32(a.x, b.x), a.y, b.y), a.z, b.z);
+}
+
+// Neon normalize
+inline vec3x4 normalize(vec3x4 v){
+    float32x4_t len2 = vmlaq_f32(vmlaq_f32(vmulq_f32(v.x, v.x), v.y, v.y), v.z, v.z);
+
+    float32x4_t invLen = vrsqrteq_f32(len2);
+
+    // NR refinement
+    // Physx, quackclulus, quarks and stuff
+    // basically, as my undervolted sleep deprived brain matter understands it
+    // this is such that it is a way to approximate the root of a function and then check using curvature information to refine the result
+    invLen = vmulq_f32(vrsqrtsq_f32(vmulq_f32(len2, invLen), invLen), invLen);
+
+    return {
+        vmulq_f32(v.x, invLen),
+        vmulq_f32(v.y, invLen),
+        vmulq_f32(v.z, invLen)
+    };
+}
+
+// NEON reflections
+// holy fuck the hills are silent
+inline vec3x4 reflect(vec3x4 v, vec3x4 n){
+    float32x4_t d = dot(v, n);
+    float32x4_t two = vdupq_n_f32(2.0f);
+
+    vec3x4 r;
+    r.x = vmlsq_f32(v.x, n.x, vmulq_f32(two, d));
+    r.y = vmlsq_f32(v.y, n.y, vmulq_f32(two, d));
+    r.z = vmlsq_f32(v.z, n.z, vmulq_f32(two, d));
+    return r;
+}
+
 
 // Faster vec3 replacement
+// -------------------------------
+// V E C 3 F S C A L A R
+// -------------------------------
 struct vec3f {
     float x, y, z;
 
@@ -567,6 +618,27 @@ inline vec3f cross(const vec3f& a, const vec3f& b) {
     );
 }
 
+
+// Well this is cursed
+// Scalar for neon functions
+inline vec3f neon_normalize(const vec3f& v)
+{
+    float len2 = v.x*v.x + v.y*v.y + v.z*v.z;
+    float inv = 1.0f / sqrtf(len2 + 1e-20f);
+    return { v.x * inv, v.y * inv, v.z * inv };
+}
+
+inline vec3f neon_reflect(const vec3f& v, const vec3f& n)
+{
+    float d = v.x*n.x + v.y*n.y + v.z*n.z;
+    return {
+        v.x - 2.0f * d * n.x,
+        v.y - 2.0f * d * n.y,
+        v.z - 2.0f * d * n.z
+    };
+}
+
+
 // Save accumulation as vectors, fallback
 // static std::vector<vec3f> cpuAccum;
 // static std::vector<vec3f> cpuFrame;
@@ -584,10 +656,6 @@ alignas(64) static float* frameB;
 
 // Since we still use OGL to display our image, a conversion from raw values to RGB is needed
 static std::vector<float> interleaved;
-
-
-std::vector<vec3f> prevFrame(width * height);
-
 
 struct Hit {
     float t;
@@ -707,6 +775,14 @@ Hit intersectScene(vec3f ro, vec3f rd)
     return best;
 }
 
+struct RayPacket4 {
+    vec3f ro[4];
+    vec3f rd[4];
+};
+
+struct ColorPacket4 {
+    vec3f c[4];
+};
 
 
 // Material colors
@@ -719,6 +795,7 @@ vec3f getColor(Material m){
 bool isLight(int m){ return m == LIGHT; }
 bool isMirror(int m){ return m == MIRROR;}
 
+// have this in case this explodes or something
 vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
 {
     vec3f color(0.0f);
@@ -770,11 +847,122 @@ vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
     return color;
 }
 
+// N E O N T I E M
+void trace4(
+    const vec3f ro[4],
+    const vec3f rd[4],
+    vec3f outColor[4],
+    uint32_t rng[4])
+{
+    vec3f color[4] = {
+        vec3f(0), vec3f(0), vec3f(0), vec3f(0)
+    };
+
+    vec3f throughput[4] = {
+        vec3f(1), vec3f(1), vec3f(1), vec3f(1)
+    };
+
+    vec3f ro_l[4], rd_l[4];
+
+    for(int i = 0; i < 4; i++)
+    {
+        ro_l[i] = ro[i];
+        rd_l[i] = rd[i];
+    }
+
+    // path bounces
+    for(int bounce = 0; bounce < 3; bounce++)
+    {
+        for(int i = 0; i < 4; i++)
+        {
+            Hit h = intersectScene(ro_l[i], rd_l[i]);
+
+            if(h.t < 0.0f)
+            {
+                color[i].x += throughput[i].x * 0.7f;
+                color[i].y += throughput[i].y * 0.8f;
+                color[i].z += throughput[i].z * 1.0f;
+                continue;
+            }
+
+            vec3f pos = {
+                ro_l[i].x + rd_l[i].x * h.t,
+                ro_l[i].y + rd_l[i].y * h.t,
+                ro_l[i].z + rd_l[i].z * h.t
+            };
+
+            if(h.mat == LIGHT){
+                color[i].x += throughput[i].x * 12.0f;
+                color[i].y += throughput[i].y * 12.0f;
+                color[i].z += throughput[i].z * 12.0f;
+                continue;
+            }      
+            if(h.mat == MIRROR)
+            {
+                rd_l[i] = neon_reflect(rd_l[i], h.normal);
+            }
+            else
+            {
+                uint32_t& s = rng[i];
+
+                vec3f r = {
+                    randFloat(s) * 2.0f - 1.0f,
+                    randFloat(s) * 2.0f - 1.0f,
+                    randFloat(s) * 2.0f - 1.0f
+                };
+
+                r = neon_normalize(r);
+
+                rd_l[i] = neon_normalize({
+                    h.normal.x + r.x,
+                    h.normal.y + r.y,
+                    h.normal.z + r.z
+                });
+
+                vec3f c = getColor(h.mat);
+
+                throughput[i].x *= c.x;
+                throughput[i].y *= c.y;
+                throughput[i].z *= c.z;
+            }
+
+            ro_l[i] = {
+                pos.x + h.normal.x * 0.001f,
+                pos.y + h.normal.y * 0.001f,
+                pos.z + h.normal.z * 0.001f
+            };
+        }
+    }
+
+    for(int i = 0; i < 4; i++)
+        outColor[i] = color[i];
+}
+
+
+
 static vec3f camForward;
 static vec3f camRight;
 static vec3f camUp;
 static vec3f camPos;
 
+// Scalar ray compute
+inline vec3f computeRay(float x, float y)
+{
+    float uvx = x / float(width);
+    float uvy = y / float(height);
+
+    return normalize(
+        camForward +
+        camRight * (uvx * 2.0f - 1.0f) +
+        camUp    * (uvy * 2.0f - 1.0f)
+    );
+}
+
+//S E E B
+inline uint32_t seed(int idx, int frame)
+{
+    return (uint32_t)(idx * 1973u ^ frame * 9277u ^ 0x9e3779b9u) | 1u;
+}
 
 // Denoising sampler
 vec3f cpuPathTrace(float uvx, float uvy, float px, float py){
@@ -784,17 +972,16 @@ vec3f cpuPathTrace(float uvx, float uvy, float px, float py){
 
     pxn *= width / float(height);
 
-    vec2f p(pxn, pyn);
-
     // Camera setup
     vec3f ro = vec3f(0, 2, -6);
 
-    vec3f rd = normalize(camForward + p.x * camRight + p.y * camUp);
+    vec3f rd = normalize(camForward + pxn * camRight + pyn * camUp);
 
     uint32_t rng = uint32_t(px) * 1973u ^ uint32_t(py) * 9277u ^ uint32_t(frame) * 26699u | 1u;
 
-    return trace(ro, rd, rng);
+    vec3f  col = trace(ro, rd, rng);
 
+    return col;
 }
 
 int frameIndex = frame;
@@ -807,38 +994,50 @@ void renderTile(int startY, int endY, int frameIndex)
     float invH = 1.0f / height;
 
     // Average of frames
-    float invFrame = 1.0f / float(frame + 1);
+    float invFrame = 1.0f / float(currentFrame + 1);
 
 
     for(int y = startY; y < endY; y++){
+
     if(!cpuRenderRunning) return;
-    for(int x = 0; x < width; x++)
+
+    for(int x = 0; x < width; x += 4)
     {
-        float px = x + 0.5f;
-        float py = y + 0.5f;
+        int base = y * width + x;
 
-        float uvx = px * invW;
-        float uvy = py * invH;
+        vec3f ro[4], rd[4], col[4];
+        uint32_t rng[4];
 
-        vec3f sample = cpuPathTrace(uvx, uvy, px, py);
+        for(int k = 0; k < 4; k++)
+        {
+            int idx = base + k;
 
-        sample = clamp(sample, 0.0f, 50.0f);
+            ro[k] = camPos;
+            rd[k] = computeRay(x + k, y);
 
-        int i = y * width + x;
+            rng[k] = seed(idx, currentFrame);
+        }
 
-        // old accumulation, fallback
-        // cpuAccum[i] += (sample - cpuAccum[i]) / float(frame + 1);
-        // cpuFrame[i] = cpuAccum[i];
+        trace4(ro, rd, col, rng);
 
-        // Sample our accumulation buffer
-        accumR[i] += (sample.x - accumR[i]) * invFrame;
-        accumG[i] += (sample.y - accumG[i]) * invFrame;
-        accumB[i] += (sample.z - accumB[i]) * invFrame;
+        for(int k = 0; k < 4; k++)
+        {
+            int i = base + k;
 
-        // Copy to fb
-        frameR[i] = accumR[i];
-        frameG[i] = accumG[i];
-        frameB[i] = accumB[i];
+            vec3f sample = col[k];
+
+            sample = clamp(sample, 0.0f, 50.0f);
+
+            float invFrame = 1.0f / float(currentFrame + 1);
+
+            accumR[i] += (sample.x - accumR[i]) * invFrame;
+            accumG[i] += (sample.y - accumG[i]) * invFrame;
+            accumB[i] += (sample.z - accumB[i]) * invFrame;
+
+            frameR[i] = accumR[i];
+            frameG[i] = accumG[i];
+            frameB[i] = accumB[i];
+        }
     }
 }
 }
@@ -862,12 +1061,13 @@ void workerThread(int id)
 
         renderTile(startY, endY, currentFrame);
 
-        tilesDone++;
+        tilesDone.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
 
 void CPURTSceneinit(){
+    vec2f u_resolution(width, height);
     GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, rt_vs);
     GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, rt_fs);
     if(!vsh || !fsh) {
@@ -882,9 +1082,6 @@ void CPURTSceneinit(){
     glBindFragDataLocation(s_program, 0, "fragColor");
     glLinkProgram(s_program);
 
-
-    frameLoc = glGetUniformLocation(s_program, "u_frame");
-    prevframeLoc = glGetUniformLocation(s_program, "u_prevFrame");
     resolutionLoc = glGetUniformLocation(s_program, "u_resolution");
     loc_time = glGetUniformLocation(s_program, "u_time");
 
@@ -917,7 +1114,7 @@ void CPURTSceneinit(){
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -997,7 +1194,11 @@ void CPURTSceneinit(){
 
     // init buffers
     for(int i = 0; i < total; i++) {
-    accumR[i] = accumG[i] = accumB[i] = 0.0f;
+        accumR[i] = accumG[i] = accumB[i] = 0.0f;
+    }
+
+    for (int i = 0; i < total; i++) {
+        frameR[i] = frameG[i] = frameB[i] = 0.0f;
     }
 
     glGenTextures(1, &screenTex);
@@ -1029,7 +1230,7 @@ void renderCPUFrame()
 
     workCV.notify_all();
 
-    while(tilesDone < THREAD_COUNT)
+    while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
         std::this_thread::yield();
 
     workReady = false;
@@ -1043,6 +1244,8 @@ float getTime3()
 
 
 void CPURTRender(){
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, height);
 
     // FPS calculation
     u64 currentTime = armGetSystemTick();
@@ -1072,34 +1275,41 @@ void CPURTRender(){
     // draw CPU functions
     renderCPUFrame();
 
-    glBindTexture(GL_TEXTURE_2D, screenTex);
 
     int total = width * height;
     interleaved.resize(total * 3);
 
-    for(int i = 0; i < total; i++) {
-        interleaved[i*3 + 0] = frameR[i];
-        interleaved[i*3 + 1] = frameG[i];
-        interleaved[i*3 + 2] = frameB[i];
+    // draw our first triangle
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(s_program);
+    glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
+
+    
+    for(int i = 0; i < total; i ++) {
+        interleaved[i * 3 + 0] = frameR[i];
+        interleaved[i * 3 + 1] = frameG[i];
+        interleaved[i * 3 + 2] = frameB[i];
     }
 
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, interleaved.data());
-
-
-    // draw our first triangle
-    glUseProgram(s_program);
-    glUniform1f(loc_time, getTime3());
-    glUniform2f(resolutionLoc, width, height); 
-    glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
-        
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, screenTex);
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, interleaved.data());
+    glBindVertexArray(0);
+    glBindVertexArray(s_vao);
+    
     // Triangles, placed in your mind
     // You will never be free
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawArrays(GL_TRIANGLES,0, 3);
+
+
+
+    glUniform1f(loc_time, getTime3());
+    glUniform2f(resolutionLoc, width, height); 
+
+    
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+
 
     frame++;
 
