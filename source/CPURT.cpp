@@ -407,6 +407,7 @@ static GLuint createAndCompileShader(GLenum type, const char* source)
 
 // CPUPT fun
 // FUCKING KILL ME GOD GDAMMIT
+
 int width = 1280;
 int height = 720;
 
@@ -567,8 +568,23 @@ inline vec3f cross(const vec3f& a, const vec3f& b) {
 }
 
 // Save accumulation as vectors, fallback
-static std::vector<vec3f> cpuAccum;
-static std::vector<vec3f> cpuFrame;
+// static std::vector<vec3f> cpuAccum;
+// static std::vector<vec3f> cpuFrame;
+
+// Use array structures for the accumulation and current frame buffers respectively
+// Accumulation buffer
+alignas(64) static float* accumR;
+alignas(64) static float* accumG;
+alignas(64) static float* accumB;
+
+// Final frame buffer
+alignas(64) static float* frameR;
+alignas(64) static float* frameG;
+alignas(64) static float* frameB;
+
+// Since we still use OGL to display our image, a conversion from raw values to RGB is needed
+static std::vector<float> interleaved;
+
 
 std::vector<vec3f> prevFrame(width * height);
 
@@ -708,6 +724,7 @@ vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
     vec3f color(0.0f);
     vec3f throughput(1.0f);
 
+    // Controls the amount of bounces that the rays are allowed to produce
     for(int bounce=0; bounce<3; bounce++)
     {
         Hit h = intersectScene(ro,rd);
@@ -789,6 +806,10 @@ void renderTile(int startY, int endY, int frameIndex)
     float invW = 1.0f / width;
     float invH = 1.0f / height;
 
+    // Average of frames
+    float invFrame = 1.0f / float(frame + 1);
+
+
     for(int y = startY; y < endY; y++){
     if(!cpuRenderRunning) return;
     for(int x = 0; x < width; x++)
@@ -806,8 +827,18 @@ void renderTile(int startY, int endY, int frameIndex)
         int i = y * width + x;
 
         // old accumulation, fallback
-        cpuAccum[i] += (sample - cpuAccum[i]) / float(frame + 1);
-        cpuFrame[i] = cpuAccum[i];
+        // cpuAccum[i] += (sample - cpuAccum[i]) / float(frame + 1);
+        // cpuFrame[i] = cpuAccum[i];
+
+        // Sample our accumulation buffer
+        accumR[i] += (sample.x - accumR[i]) * invFrame;
+        accumG[i] += (sample.y - accumG[i]) * invFrame;
+        accumB[i] += (sample.z - accumB[i]) * invFrame;
+
+        // Copy to fb
+        frameR[i] = accumR[i];
+        frameG[i] = accumG[i];
+        frameB[i] = accumB[i];
     }
 }
 }
@@ -940,6 +971,7 @@ void CPURTSceneinit(){
     // Initialize text renderer for FPS display
     initTextRenderer();
 
+    // Set starting conditions, this also helps reruns to not explode
     running = true;
     cpuRenderRunning = false;
     tilesDone = 0;
@@ -952,9 +984,21 @@ void CPURTSceneinit(){
 
 
     // Setup CPU for output
-    cpuAccum.resize(width * height, vec3f(0.0f));
-    cpuFrame.resize(width * height);
+    int total = width * height;
 
+    // Allocate proper memory for buffers
+    accumR = (float*)aligned_alloc(64, total * sizeof(float));
+    accumG = (float*)aligned_alloc(64, total * sizeof(float));
+    accumB = (float*)aligned_alloc(64, total * sizeof(float));
+
+    frameR = (float*)aligned_alloc(64, total * sizeof(float));
+    frameG = (float*)aligned_alloc(64, total * sizeof(float));
+    frameB = (float*)aligned_alloc(64, total * sizeof(float));
+
+    // init buffers
+    for(int i = 0; i < total; i++) {
+    accumR[i] = accumG[i] = accumB[i] = 0.0f;
+    }
 
     glGenTextures(1, &screenTex);
     glBindTexture(GL_TEXTURE_2D, screenTex);
@@ -1030,7 +1074,16 @@ void CPURTRender(){
 
     glBindTexture(GL_TEXTURE_2D, screenTex);
 
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, cpuFrame.data());
+    int total = width * height;
+    interleaved.resize(total * 3);
+
+    for(int i = 0; i < total; i++) {
+        interleaved[i*3 + 0] = frameR[i];
+        interleaved[i*3 + 1] = frameG[i];
+        interleaved[i*3 + 2] = frameB[i];
+    }
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, interleaved.data());
 
 
     // draw our first triangle
@@ -1077,8 +1130,15 @@ void CPURTExit()
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
 
-    cpuAccum.clear();
-    cpuFrame.clear();
+    free(accumR);
+    free(accumG);
+    free(accumB);
+
+    free(frameR);
+    free(frameG);
+    free(frameB);
+    // cpuAccum.clear();
+    // cpuFrame.clear();
     frame = 0; 
 }
 
