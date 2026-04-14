@@ -34,7 +34,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #     - <Project name>.json
 #     - config.json
 #   If a JSON file is provided or autodetected, an ExeFS PFS0 (.nsp) is built instead
-#   of a homebrew executable (.nro). This is intended to be used for sysmodules.
+#   of a homebrew executable (.nro). This is intended to be used for sysmodules. 
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
 TARGET		:=	$(notdir $(CURDIR))
@@ -45,7 +45,7 @@ INCLUDES	:=	include
 #ROMFS	:=	romfs
 APP_TITLE   :=  Furmark-NX
 APP_AUTHOR  :=  ClunkerBlunker
-APP_VERSION :=  0.5.0
+APP_VERSION :=  0.5.1
 
 #---------------------------------------------------------------------------------
 # options for code generation
