@@ -9,25 +9,16 @@
 #include <condition_variable>
 #include <mutex>
 
-
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <EGL/egl.h>    // EGL library
 #include <EGL/eglext.h> // EGL extensions
 #include <glad/glad.h>  // glad library (OpenGL loader)
 
-#define GLM_FORCE_PURE
-#include <glm/vec3.hpp>
-#include <glm/vec4.hpp>
-#include <glm/glm.hpp>
-#include <glm/mat4x4.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/constants.hpp>
 
 #include "stb_image.h"
-#include "fur_png.h"
-#include "noise_png.h"
-#include "wall_png.h"
 #include "sates.h"
 
 // nxlink support
@@ -342,11 +333,6 @@ static u64 s_fpsUpdateTime = 0;
 
 static int frame = 0;
 
-struct Sphere{
-    glm::vec3 center;
-    float radius;
-    int material;
-};
 
 
 static const char* const rt_vs = R"text(
@@ -419,25 +405,17 @@ static GLuint createAndCompileShader(GLenum type, const char* source)
 }
 
 
-using namespace glm;
-
 // CPUPT fun
+// FUCKING KILL ME GOD GDAMMIT
 int width = 1280;
 int height = 720;
-
-// Save accumulation as vectors, fallback
-static std::vector<glm::vec3> cpuAccum;
-static std::vector<glm::vec3> cpuFrame;
-
 
 static GLuint screenTex;
 
 
 // needed vars
-vec2 u_resolution(width, height);
 float u_time;
 int u_frame;
-std::vector<vec3> prevFrame(width * height);
 
 // Vars for multithreading
 static const int THREAD_COUNT = 3;
@@ -463,12 +441,6 @@ enum Material{
 };
 
 
-struct Hit {
-    float t;
-    Material mat;
-    vec3 normal;
-};
-
 // Random
 inline float randFloat(uint32_t& state)
 {
@@ -479,10 +451,144 @@ inline float randFloat(uint32_t& state)
     return (state & 0xFFFFFF) / float(0xFFFFFF);
 }
 
+// Vec2 replacement, because I like spaget
+struct vec2f {
+    float x, y;
+
+    inline vec2f() {}
+    inline vec2f(float x_, float y_) : x(x_), y(y_) {}
+};
+
+vec2f u_resolution(width, height);
+
+
+// Faster vec3 replacement
+struct vec3f {
+    float x, y, z;
+
+    inline vec3f () {}
+    inline vec3f(float v) : x(v), y(v), z(v) {}
+    inline vec3f(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+};
+
+// Vec3 operations, because A57 asked for adderal
+inline vec3f operator+(const vec3f& a, const vec3f& b) {
+    return vec3f(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+inline vec3f operator-(const vec3f& a, const vec3f& b) {
+    return vec3f(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+inline vec3f operator-(const vec3f& v) {
+    return vec3f(-v.x, -v.y, -v.z);
+}
+
+inline vec3f& operator*=(vec3f& a, const vec3f& b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+    return a;
+}
+
+inline vec3f& operator*=(vec3f& a, float b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+    return a;
+}
+
+inline vec3f operator*(const vec3f& a, float b) {
+    return vec3f(a.x * b, a.y * b, a.z * b);
+}
+
+inline vec3f operator*(float b, const vec3f& a) {
+    return a * b;
+}
+
+inline vec3f operator*(const vec3f& a, const vec3f& b) {
+    return vec3f(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+
+inline vec3f& operator+=(vec3f& a, const vec3f& b) {
+    a.x += b.x; a.y += b.y; a.z += b.z;
+    return a;
+}
+
+inline vec3f operator/(const vec3f& a, float b) {
+    float inv = 1.0f / b;
+    return vec3f(a.x * inv, a.y * inv, a.z * inv);
+}
+
+inline vec3f& operator/=(vec3f& a, float b) {
+    float inv = 1.0f / b;
+    a.x *= inv;
+    a.y *= inv;
+    a.z *= inv;
+    return a;
+}
+
+// Dot product
+inline float dot(const vec3f& a, const vec3f& b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+// Normalization
+// Replace with NEON rsqrt once we know this doesn't explode
+inline vec3f normalize(const vec3f& v) {
+    float len2 = dot(v, v);
+    float invLen = 1.0f / sqrtf(len2 + 1e-20f);
+    return v * invLen;
+}
+
+// Reflections
+// In my restless dreams, I see that town
+// The mental hospital
+inline vec3f reflect(const vec3f& v, const vec3f& n) {
+    return v - n * (2.0f * dot(v, n));
+}
+
+// clamp
+inline vec3f clamp(const vec3f& v, float minv, float maxv) {
+    return vec3f(
+        fminf(fmaxf(v.x, minv), maxv),
+        fminf(fmaxf(v.y, minv), maxv),
+        fminf(fmaxf(v.z, minv), maxv)
+    );
+}
+
+// Cross (cam)
+inline vec3f cross(const vec3f& a, const vec3f& b) {
+    return vec3f(
+        a.y*b.z - a.z*b.y,
+        a.z*b.x - a.x*b.z,
+        a.x*b.y - a.y*b.x
+    );
+}
+
+// Save accumulation as vectors, fallback
+static std::vector<vec3f> cpuAccum;
+static std::vector<vec3f> cpuFrame;
+
+std::vector<vec3f> prevFrame(width * height);
+
+
+struct Hit {
+    float t;
+    Material mat;
+    vec3f normal;
+};
+
+struct Sphere{
+    vec3f center;
+    float radius;
+    int material;
+};
+
 // Sphere SDF
-bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float r, float& t)
+bool intersectSphere(vec3f ro, vec3f rd, vec3f center, float r, float& t)
 {
-    vec3 oc = ro - center;
+    vec3f oc = ro - center;
 
     float b = dot(oc, rd);
     float c = dot(oc, oc) - r*r;
@@ -497,8 +603,10 @@ bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float r, float& t)
 
     return t > 0;
 }
+
+
 // Scene
-Hit intersectScene(vec3 ro, vec3 rd)
+Hit intersectScene(vec3f ro, vec3f rd)
 {
     Hit best;
     best.t = 1e30f;
@@ -509,14 +617,14 @@ Hit intersectScene(vec3 ro, vec3 rd)
     const float eps = 1e-6f;
 
     // mirror sphere
-    if(intersectSphere(ro,rd,vec3(0,1,-0.5f),1.0f,t))
+    if(intersectSphere(ro,rd,vec3f(0,1,-0.5f),1.0f,t))
     {
         if(t < best.t)
         {
             best.t = t;
             best.mat = MIRROR;
-            vec3 p = ro + rd*t;
-            best.normal = normalize(p - vec3(0,1,-0.5f));
+            vec3f p = ro + rd*t;
+            best.normal = normalize(p - vec3f(0,1,-0.5f));
         }
     }
 
@@ -526,7 +634,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
         if(t>0 && t<best.t) {
             best.t = t;
             best.mat = RED;
-            best.normal = vec3(1,0,0);
+            best.normal = vec3f(1,0,0);
         }
     }
 
@@ -536,7 +644,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
         if(t>0 && t<best.t) {
             best.t = t;
             best.mat = GREEN;
-            best.normal = vec3(-1,0,0);
+            best.normal = vec3f(-1,0,0);
         }
     }
 
@@ -546,7 +654,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
         if(t>0 && t<best.t) {
             best.t = t;
             best.mat = WHITE;
-            best.normal = vec3(0,1,0);
+            best.normal = vec3f(0,1,0);
         }
     }
 
@@ -554,7 +662,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
     if (fabs(rd.y) > eps) {
         t = (4.0f - ro.y) / rd.y;
         if(t>0 && t<best.t) {
-            vec3 hit = ro + rd * t;
+            vec3f hit = ro + rd * t;
 
             if(fabs(hit.x) < 1.0f && fabs(hit.z) < 1.0f)
                 best.mat = LIGHT;
@@ -562,7 +670,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
                 best.mat = WHITE;
 
             best.t = t;
-            best.normal = vec3(0,-1,0);
+            best.normal = vec3f(0,-1,0);
         }
     }
 
@@ -572,7 +680,7 @@ Hit intersectScene(vec3 ro, vec3 rd)
         if(t>0 && t<best.t) {
             best.t = t;
             best.mat = WHITE;
-            best.normal = vec3(0,0,-1);
+            best.normal = vec3f(0,0,-1);
         }
     }
 
@@ -584,20 +692,21 @@ Hit intersectScene(vec3 ro, vec3 rd)
 }
 
 
+
 // Material colors
-vec3 getColor(Material m){
-    if(m == RED) return vec3(1, 0.2, 0.2);
-    if(m == GREEN) return vec3(0.2, 1.0, 0.2);
-    return vec3(0.9);
+vec3f getColor(Material m){
+    if(m == RED) return vec3f(1, 0.2, 0.2);
+    if(m == GREEN) return vec3f(0.2, 1.0, 0.2);
+    return vec3f(0.9);
 }
 
 bool isLight(int m){ return m == LIGHT; }
 bool isMirror(int m){ return m == MIRROR;}
 
-vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
+vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
 {
-    vec3 color(0);
-    vec3 throughput(1);
+    vec3f color(0.0f);
+    vec3f throughput(1.0f);
 
     for(int bounce=0; bounce<3; bounce++)
     {
@@ -605,17 +714,17 @@ vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
 
         if(h.t < 0)
         {
-            color += throughput * vec3(0.7,0.8,1.0);
+            color += throughput * vec3f(0.7,0.8,1.0);
             break;
         }
 
-        vec3 pos = ro + rd*h.t;
-        vec3 n = h.normal;
+        vec3f pos = ro + rd*h.t;
+        vec3f n = h.normal;
 
         // ceiling light
         if(h.mat == LIGHT)
         {
-            color += throughput * vec3(12.0f);
+            color += throughput * vec3f(12.0f);
             break;
         }
 
@@ -625,7 +734,7 @@ vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
         }
         else
         {
-            vec3 r = normalize(vec3(
+            vec3f r = normalize(vec3f(
                 randFloat(rng) * 2.0f - 1.0f,
                 randFloat(rng) * 2.0f - 1.0f,
                 randFloat(rng) * 2.0f - 1.0f
@@ -644,26 +753,26 @@ vec3 trace(vec3 ro, vec3 rd, uint32_t& rng)
     return color;
 }
 
-static vec3 camForward;
-static vec3 camRight;
-static vec3 camUp;
-static vec3 camPos;
+static vec3f camForward;
+static vec3f camRight;
+static vec3f camUp;
+static vec3f camPos;
 
 
 // Denoising sampler
-vec3 cpuPathTrace(float uvx, float uvy, float px, float py){
+vec3f cpuPathTrace(float uvx, float uvy, float px, float py){
     // convert uv values to screen space
     float pxn = uvx * 2.0f - 1.0f;
     float pyn = uvy * 2.0f - 1.0f;
 
     pxn *= width / float(height);
 
-    vec2 p(pxn, pyn);
+    vec2f p(pxn, pyn);
 
     // Camera setup
-    vec3 ro = vec3(0, 2, -6);
+    vec3f ro = vec3f(0, 2, -6);
 
-    vec3 rd = normalize(camForward + p.x * camRight + p.y * camUp);
+    vec3f rd = normalize(camForward + p.x * camRight + p.y * camUp);
 
     uint32_t rng = uint32_t(px) * 1973u ^ uint32_t(py) * 9277u ^ uint32_t(frame) * 26699u | 1u;
 
@@ -690,9 +799,9 @@ void renderTile(int startY, int endY, int frameIndex)
         float uvx = px * invW;
         float uvy = py * invH;
 
-        glm::vec3 sample = cpuPathTrace(uvx, uvy, px, py);
+        vec3f sample = cpuPathTrace(uvx, uvy, px, py);
 
-        sample = glm::clamp(sample, glm::vec3(0.0f), glm::vec3(50.0f));
+        sample = clamp(sample, 0.0f, 50.0f);
 
         int i = y * width + x;
 
@@ -843,7 +952,7 @@ void CPURTSceneinit(){
 
 
     // Setup CPU for output
-    cpuAccum.resize(width * height, glm::vec3(0.0f));
+    cpuAccum.resize(width * height, vec3f(0.0f));
     cpuFrame.resize(width * height);
 
 
@@ -857,7 +966,7 @@ void CPURTSceneinit(){
 
 }
 
-glm::vec3 cpuPathTrace(glm::vec2 uv, glm::vec2 fragCoord);
+vec3f cpuPathTrace(vec2f uv, vec2f fragCoord);
 
 
 // How did we get here
@@ -909,11 +1018,11 @@ void CPURTRender(){
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
-    camPos = vec3(0,2,-6);
-    vec3 target = vec3(0,2,0);
+    camPos = vec3f(0,2,-6);
+    vec3f target = vec3f(0,2,0);
 
     camForward = normalize(target - camPos);
-    camRight = normalize(cross(camForward, vec3(0,1,0)));
+    camRight = normalize(cross(camForward, vec3f(0,1,0)));
     camUp = cross(camRight, camForward);
 
     // draw CPU functions
