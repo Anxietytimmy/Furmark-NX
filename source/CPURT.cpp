@@ -1070,16 +1070,44 @@ void renderTile(int startY, int endY, int frameIndex)
 
         vec3f ro[4], rd[4], col[4];
         uint32_t rng[4];
+            
+            // pixel coord
+            float32x4_t px = {
+                float(x + 0) + 0.5f,
+                float(x + 1) + 0.5f,
+                float(x + 2) + 0.5f,
+                float(x + 3) + 0.5f
+            };
 
-        for(int k = 0; k < 4; k++)
-        {
-            int idx = base + k;
+            float32x4_t py = vdupq_n_f32(float(y) + 0.5f);
+            
+            // Convert to UV
+            float32x4_t invW = vdupq_n_f32(1.0f / width);
+            float32x4_t invH = vdupq_n_f32(1.0f / height);
 
-            ro[k] = camPos;
-            rd[k] = computeRay(x + k, y);
+            float32x4_t uvx = vmulq_f32(px, invW);
+            float32x4_t uvy = vmulq_f32(py, invH);
 
-            rng[k] = seed(idx, currentFrame);
-        }
+            float32x4_t sx = vsubq_f32(vmulq_n_f32(uvx, 2.0f), vdupq_n_f32(1.0f));
+            float32x4_t sy = vsubq_f32(vmulq_n_f32(uvy, 2.0f), vdupq_n_f32(1.0f));
+
+            // correct aspect
+            float aspect = float(width) / float(height);
+            sx = vmulq_n_f32(sx, aspect);
+
+            float sx_arr[4], sy_arr[4];
+            vst1q_f32(sx_arr, sx);
+            vst1q_f32(sy_arr, sy);
+
+            for(int k = 0; k < 4; k++){
+                ro[k] = camPos;
+
+                rd[k] = normalize(camForward + camRight * sx_arr[k] + camUp * sy_arr[k]);
+
+                int idx = base + k;
+                rng[k] = seed(idx, currentFrame);
+            }
+        
 
         trace4(ro, rd, col, rng);
 
@@ -1094,9 +1122,13 @@ void renderTile(int startY, int endY, int frameIndex)
             float32x4_t b = vld1q_f32(&accumB[i]);    
             
             // Load samples
-            float32x4_t sr = { col[0].x, col[1].x, col[2].x, col[3].x };
-            float32x4_t sg = { col[0].y, col[1].y, col[2].y, col[3].y };
-            float32x4_t sb = { col[0].z, col[1].z, col[2].z, col[3].z };
+            float sr_arr[4] = { col[0].x, col[1].x, col[2].x, col[3].x };
+            float sg_arr[4] = { col[0].y, col[1].y, col[2].y, col[3].y };
+            float sb_arr[4] = { col[0].z, col[1].z, col[2].z, col[3].z };
+
+            float32x4_t sr = vld1q_f32(sr_arr);
+            float32x4_t sg = vld1q_f32(sg_arr);
+            float32x4_t sb = vld1q_f32(sb_arr);
 
             // Inv frame
             float32x4_t invF = vdupq_n_f32(1.0f / float(currentFrame + 1));
