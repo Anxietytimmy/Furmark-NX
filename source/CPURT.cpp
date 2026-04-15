@@ -1307,8 +1307,25 @@ void renderCPUFrame()
 
     workCV.notify_all();
 
+    // Main thread also pulls tiles
+    while (true)
+    {
+        int tile = nextTile.fetch_add(1, std::memory_order_relaxed);
+        int startY = tile * TILE_H;
+
+        if (startY >= height)
+            break;
+
+        int endY = startY + TILE_H;
+        if (endY > height) endY = height;
+
+        renderTile(startY, endY, currentFrame);
+    }
+
+    // Wait for workers to finish
     while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
-        std::this_thread::yield();
+    {
+    }
 
     workReady = false;
 }
