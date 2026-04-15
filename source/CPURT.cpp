@@ -1085,21 +1085,37 @@ void renderTile(int startY, int endY, int frameIndex)
 
         for(int k = 0; k < 4; k++)
         {
-            int i = base + k;
+            // NEON based vectorized accumulation
+            int i = base;
+        
+            // Load accumulators
+            float32x4_t r = vld1q_f32(&accumR[i]);
+            float32x4_t g = vld1q_f32(&accumG[i]);
+            float32x4_t b = vld1q_f32(&accumB[i]);    
+            
+            // Load samples
+            float32x4_t sr = { col[0].x, col[1].x, col[2].x, col[3].x };
+            float32x4_t sg = { col[0].y, col[1].y, col[2].y, col[3].y };
+            float32x4_t sb = { col[0].z, col[1].z, col[2].z, col[3].z };
 
-            vec3f sample = col[k];
+            // Inv frame
+            float32x4_t invF = vdupq_n_f32(1.0f / float(currentFrame + 1));
 
-            sample = clamp(sample, 0.0f, 50.0f);
+            // Update accumulation
+            r = vmlaq_f32(r, vsubq_f32(sr, r), invF);
+            g = vmlaq_f32(g, vsubq_f32(sg, g), invF);
+            b = vmlaq_f32(b, vsubq_f32(sb, b), invF);
 
-            float invFrame = 1.0f / float(currentFrame + 1);
+            // Store values
+            vst1q_f32(&accumR[i], r);
+            vst1q_f32(&accumG[i], g);
+            vst1q_f32(&accumB[i], b);
 
-            accumR[i] += (sample.x - accumR[i]) * invFrame;
-            accumG[i] += (sample.y - accumG[i]) * invFrame;
-            accumB[i] += (sample.z - accumB[i]) * invFrame;
+            // Copy to FB
+            vst1q_f32(&frameR[i], r);
+            vst1q_f32(&frameG[i], g);
+            vst1q_f32(&frameB[i], b);
 
-            frameR[i] = accumR[i];
-            frameG[i] = accumG[i];
-            frameB[i] = accumB[i];
         }
     }
 }
@@ -1395,15 +1411,10 @@ void CPURTRender(){
     // You will never be free
     glDrawArrays(GL_TRIANGLES,0, 3);
 
-
-
     glUniform1f(loc_time, getTime3());
     glUniform2f(resolutionLoc, width, height); 
 
-    
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-
 
     frame++;
 
