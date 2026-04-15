@@ -19,7 +19,6 @@
 #include <EGL/eglext.h> // EGL extensions
 #include <glad/glad.h>  // glad library (OpenGL loader)
 
-
 #include "stb_image.h"
 #include "sates.h"
 
@@ -414,12 +413,12 @@ int height = 720;
 
 static GLuint screenTex;
 
-
 // needed vars
 float u_time;
 
 // Vars for multithreading
 static const int THREAD_COUNT = 3;
+static std::atomic<int> nextTile(0);
 
 static std::thread workers[THREAD_COUNT];
 static std::atomic<bool> running(true);
@@ -433,24 +432,7 @@ static int currentFrame = 0;
 
 std::atomic<bool> cpuRenderRunning(false);
 
-enum Material{
-    WHITE,
-    RED,
-    GREEN,
-    LIGHT,
-    MIRROR
-};
-
-
-// Random
-inline float randFloat(uint32_t& state)
-{
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-
-    return (state & 0xFFFFFF) / float(0xFFFFFF);
-}
+// vec2/3 replacements for scalar/NEON functions
 
 // Vec2 replacement, because I like spaget
 struct vec2f {
@@ -459,8 +441,6 @@ struct vec2f {
     inline vec2f() {}
     inline vec2f(float x_, float y_) : x(x_), y(y_) {}
 };
-
-vec2f u_resolution(width, height);
 
 // I FUCKING LOVE XENON BULBS NEON HELL YEAHHHH
 // In full non shitpost fashion, NEON needs 128bit SIMD, or 4x  F32 lanes
@@ -471,6 +451,13 @@ vec2f u_resolution(width, height);
 struct vec3x4 {
     float32x4_t x, y, z;
 };
+
+struct Hit4 {
+    float32x4_t t;
+    vec3x4 normal;
+    uint32x4_t material;
+};
+
 
 // NEON Dot product
 inline float32x4_t dot(const vec3x4& a, const vec3x4& b){
@@ -635,6 +622,75 @@ inline vec3f neon_reflect(const vec3f& v, const vec3f& n)
         v.y - 2.0f * d * n.y,
         v.z - 2.0f * d * n.z
     };
+}
+
+// More NEON helper functions
+inline float32x4_t selectf(uint32x4_t m, float32x4_t a, float32x4_t b) {
+    return vbslq_f32(m, a, b);
+}
+
+inline uint32x4_t selecti(uint32x4_t m, uint32x4_t a, uint32x4_t b) {
+    return vbslq_u32(m, a, b);
+}
+
+inline uint32x4_t andMask(uint32x4_t a, uint32x4_t b) {
+    return vandq_u32(a, b);
+}
+
+// Pack/unpacking functions
+inline vec3x4 pack4(const vec3f* v)
+{
+    vec3x4 out;
+
+    out.x = vdupq_n_f32(0.0f);
+    out.y = vdupq_n_f32(0.0f);
+    out.z = vdupq_n_f32(0.0f);
+
+    out.x = vsetq_lane_f32(v[0].x, out.x, 0);
+    out.x = vsetq_lane_f32(v[1].x, out.x, 1);
+    out.x = vsetq_lane_f32(v[2].x, out.x, 2);
+    out.x = vsetq_lane_f32(v[3].x, out.x, 3);
+
+    out.y = vsetq_lane_f32(v[0].y, out.y, 0);
+    out.y = vsetq_lane_f32(v[1].y, out.y, 1);
+    out.y = vsetq_lane_f32(v[2].y, out.y, 2);
+    out.y = vsetq_lane_f32(v[3].y, out.y, 3);
+
+    out.z = vsetq_lane_f32(v[0].z, out.z, 0);
+    out.z = vsetq_lane_f32(v[1].z, out.z, 1);
+    out.z = vsetq_lane_f32(v[2].z, out.z, 2);
+    out.z = vsetq_lane_f32(v[3].z, out.z, 3);
+
+    return out;
+}
+
+inline void unpack4(const vec3x4& v, vec3f* out)
+{
+    for(int i = 0; i < 4; i++)
+    {
+        out[i].x = vgetq_lane_f32(v.x, i);
+        out[i].y = vgetq_lane_f32(v.y, i);
+        out[i].z = vgetq_lane_f32(v.z, i);
+    }
+}
+
+enum Material{
+    WHITE,
+    RED,
+    GREEN,
+    LIGHT,
+    MIRROR
+};
+
+
+// Random
+inline float randFloat(uint32_t& state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+
+    return (state & 0xFFFFFF) / float(0xFFFFFF);
 }
 
 
@@ -937,8 +993,6 @@ void trace4(
         outColor[i] = color[i];
 }
 
-
-
 static vec3f camForward;
 static vec3f camRight;
 static vec3f camUp;
@@ -967,6 +1021,17 @@ inline vec3f computeRay(float x, float y)
 inline uint32_t seed(int idx, int frame)
 {
     return (uint32_t)(idx * 1973u ^ frame * 9277u ^ 0x9e3779b9u) | 1u;
+}
+
+//Pin threads to cores so the OS doesn't throw them around everywhere
+void pinThread(int core)
+{
+    Handle thread = CUR_THREAD_HANDLE;
+
+    // Allow only this core
+    u64 mask = (1ULL << core);
+
+    svcSetThreadCoreMask(thread, mask, mask);
 }
 
 // Denoising sampler
@@ -1041,23 +1106,35 @@ void renderTile(int startY, int endY, int frameIndex)
 }
 
 // What the hell is cache
+// Each pixel writes around 32b
+// Width is at 1280, so at 1280x16 the total size per thread is 655KB
+// TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
+const int TILE_H = 16;
+
 void workerThread(int id)
 {
-    int tileHeight = height / THREAD_COUNT;
+    // Pin threads to cores
+    int core = id;
+    pinThread(core);
 
-    while(running)
+    while (running)
     {
         std::unique_lock<std::mutex> lock(workMutex);
         workCV.wait(lock, []{ return workReady || !running; });
-
-        if(!running) return;
-
-        int startY = id * tileHeight;
-        int endY = (id == THREAD_COUNT - 1) ? height : startY + tileHeight;
-
         lock.unlock();
 
-        renderTile(startY, endY, currentFrame);
+        if (!running) return;
+
+        while (true)
+        {
+            int tile = nextTile.fetch_add(1, std::memory_order_relaxed);
+            int startY = tile * TILE_H;
+
+            if (startY >= height) break;
+
+            int endY = std::min(startY + TILE_H, height);
+            renderTile(startY, endY, currentFrame);
+        }
 
         tilesDone.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1167,6 +1244,7 @@ void CPURTSceneinit(){
     initTextRenderer();
 
     // Set starting conditions, this also helps reruns to not explode
+    nextTile = 0;
     running = true;
     cpuRenderRunning = false;
     tilesDone = 0;
@@ -1220,6 +1298,7 @@ void renderCPUFrame()
     cpuRenderRunning = true;
     tilesDone = 0;
     currentFrame = frame;
+    nextTile = 0;
 
     {
         std::lock_guard<std::mutex> lock(workMutex);
@@ -1327,6 +1406,7 @@ void CPURTExit()
 {
     cpuRenderRunning = false;
     running = false;
+    nextTile = 0;
     workCV.notify_all();
 
     for(int i = 0; i < THREAD_COUNT; i++){
