@@ -618,7 +618,7 @@ vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
     vec3f throughput(1.0f);
 
     // Controls the amount of bounces that the rays are allowed to produce
-    for(int bounce=0; bounce<3; bounce++)
+    for(int bounce=0; bounce<6; bounce++)
     {
         Hit h = intersectScene(ro,rd);
 
@@ -798,8 +798,6 @@ void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
     for(int bounce = 0; bounce <3; bounce++)
     {
         // If all lines are dead, stop
-        uint32_t aliveAny[4];
-        vst1q_u32(aliveAny, alive);
         if(vaddvq_u32(alive) == 0) break;
 
         float32x4_t t;
@@ -881,7 +879,7 @@ void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
                 rx = randFloat(rng[i]) * 2.0f - 1.0f;
                 ry = randFloat(rng[i]) * 2.0f - 1.0f;
                 rz = randFloat(rng[i]) * 2.0f - 1.0f;
-                len2 = rx*rx + rz*rz;
+                len2 = rx*rx + ry*ry + rz*rz;
             } while(len2 > 1.0f || len2 < 1e-6f);
 
             // Flip hemisphere
@@ -990,9 +988,17 @@ int frameIndex = frame;
 // Multithreading is silly
 void renderTile(int startY, int endY, int frameIndex)
 {
+    // Convert to UV
+    const float32x4_t invW = vdupq_n_f32(1.0f / width);
+    const float32x4_t invH = vdupq_n_f32(1.0f / height);
+    const float aspect = float(width) / float(height);
+
+
     for(int y = startY; y < endY; y++){
 
-    if(!cpuRenderRunning) return;
+    float32x4_t py = vdupq_n_f32(float(y) + 0.5f);
+    float32x4_t uvy = vmulq_f32(py, invH);
+    float32x4_t sy = vsubq_f32(vmulq_n_f32(uvy, 2.0f), vdupq_n_f32(1.0f));
 
     for(int x = 0; x < width; x += 4)
     {
@@ -1008,26 +1014,17 @@ void renderTile(int startY, int endY, int frameIndex)
                 float(x + 2) + 0.5f,
                 float(x + 3) + 0.5f
             };
-
-            float32x4_t py = vdupq_n_f32(float(y) + 0.5f);
             
             // Convert to UV
             float32x4_t invW = vdupq_n_f32(1.0f / width);
             float32x4_t invH = vdupq_n_f32(1.0f / height);
 
             float32x4_t uvx = vmulq_f32(px, invW);
-            float32x4_t uvy = vmulq_f32(py, invH);
 
             float32x4_t sx = vsubq_f32(vmulq_n_f32(uvx, 2.0f), vdupq_n_f32(1.0f));
-            float32x4_t sy = vsubq_f32(vmulq_n_f32(uvy, 2.0f), vdupq_n_f32(1.0f));
 
             // correct aspect
-            float aspect = float(width) / float(height);
             sx = vmulq_n_f32(sx, aspect);
-
-            float sx_arr[4], sy_arr[4];
-            vst1q_f32(sx_arr, sx);
-            vst1q_f32(sy_arr, sy);
 
             vec3x4 ro4, rd4;
 
@@ -1072,8 +1069,7 @@ void renderTile(int startY, int endY, int frameIndex)
             float32x4_t blended = vmlaq_f32(old_pix, diff, vScale);
 
             // Force an alpha value of 1 to make sure accumulation doesn't exlode
-            float* bptr = (float*)&blended;
-            bptr[3] = 1.0f;
+            blended = vsetq_lane_f32(1.0f, blended, 3);
 
             // Write results
             vst1q_f32((float*)&frameBuffer[idx], blended);
@@ -1086,7 +1082,7 @@ void renderTile(int startY, int endY, int frameIndex)
 // Each pixel writes around 32b
 // Width is at 1280, so at 1280x16 the total size per thread is 655KB
 // TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
-const int TILE_H = 8;
+const int TILE_H = 16;
 
 void workerThread(int id)
 {
@@ -1126,6 +1122,7 @@ void workerThread(int id)
 
 
 void CPURTSceneinit(){
+    pinThread(2);
     vec2f u_resolution(width, height);
     GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, rt_vs);
     GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, rt_fs);
@@ -1249,6 +1246,8 @@ void CPURTSceneinit(){
     // Zero out buffer
     memset(frameBuffer, 0, total * sizeof(PixelData));
 
+    glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
+
 
     glGenTextures(1, &screenTex);
     glBindTexture(GL_TEXTURE_2D, screenTex);
@@ -1268,7 +1267,6 @@ vec3f cpuPathTrace(vec2f uv, vec2f fragCoord);
 // Hell yeah death
 void renderCPUFrame()
 {
-    pinThread(2);
     cpuRenderRunning = true;
     tilesDone = 0;
     currentFrame = frame;
@@ -1355,7 +1353,6 @@ void CPURTRender(){
     // draw our first triangle
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(s_program);
-    glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
 
 
     glActiveTexture(GL_TEXTURE0);
@@ -1370,6 +1367,7 @@ void CPURTRender(){
 
     glUniform1f(loc_time, getTime3());
     glUniform2f(resolutionLoc, width, height); 
+
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
