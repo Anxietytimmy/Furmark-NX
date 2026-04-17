@@ -323,17 +323,17 @@ static void cleanupTextRenderer() {
 static void setMesaConfig()
 {
     // Uncomment below to disable error checking and save CPU time (useful for production):
-    //setenv("MESA_NO_ERROR", "1", 1);
+    setenv("MESA_NO_ERROR", "1", 1);
 
     // Uncomment below to enable Mesa logging:
-    setenv("EGL_LOG_LEVEL", "debug", 1);
-    setenv("MESA_VERBOSE", "all", 1);
-    setenv("NOUVEAU_MESA_DEBUG", "1", 1);
+    // setenv("EGL_LOG_LEVEL", "debug", 1);
+    // setenv("MESA_VERBOSE", "all", 1);
+    // setenv("NOUVEAU_MESA_DEBUG", "1", 1);
 
     // Uncomment below to enable shader debugging in Nouveau:
-    setenv("NV50_PROG_OPTIMIZE", "0", 1);
-    setenv("NV50_PROG_DEBUG", "1", 1);
-    setenv("NV50_PROG_CHIPSET", "0x120", 1);
+    // setenv("NV50_PROG_OPTIMIZE", "0", 1);
+    // setenv("NV50_PROG_DEBUG", "1", 1);
+    // setenv("NV50_PROG_CHIPSET", "0x120", 1);
 }
 
 // FPS counter variables
@@ -781,12 +781,8 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
 }
 
 // N E O N T I E M
-void trace4(const vec3f ro_in[4], const vec3f rd_in[4], vec3f outColor[4], uint32_t rng[4])
+void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
 {
-    // Pack scalars into SOA NEON
-    vec3x4 ro = pack4(ro_in);
-    vec3x4 rd = pack4(rd_in);
-
     // Accumnulation registers
     vec3x4 color;
     color.x = color.y = color.z = vdupq_n_f32(0.0f);
@@ -804,7 +800,7 @@ void trace4(const vec3f ro_in[4], const vec3f rd_in[4], vec3f outColor[4], uint3
         // If all lines are dead, stop
         uint32_t aliveAny[4];
         vst1q_u32(aliveAny, alive);
-        if(!(aliveAny[0] | aliveAny[1] | aliveAny[2] | aliveAny[3])) break;
+        if(vaddvq_u32(alive) == 0) break;
 
         float32x4_t t;
         uint32x4_t mat;
@@ -1055,12 +1051,7 @@ void renderTile(int startY, int endY, int frameIndex)
                 rng[k] = seed(idx, currentFrame);
             }
 
-        // convert for trace
-        unpack4(ro4, ro);
-        unpack4(rd4, rd);
-
-
-        trace4(ro, rd, col, rng);
+        trace4(ro4, rd4, col, rng);
 
         float scale = 1.0f / (float)(currentFrame + 1);
         float32x4_t vScale = vdupq_n_f32(scale);
@@ -1277,6 +1268,7 @@ vec3f cpuPathTrace(vec2f uv, vec2f fragCoord);
 // Hell yeah death
 void renderCPUFrame()
 {
+    pinThread(2);
     cpuRenderRunning = true;
     tilesDone = 0;
     currentFrame = frame;
