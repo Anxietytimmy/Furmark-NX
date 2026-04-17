@@ -468,14 +468,10 @@ inline float randFloat(uint32_t& state)
 // static std::vector<vec3f> cpuAccum;
 // static std::vector<vec3f> cpuFrame;
 
-// Use array structures for the accumulation and current frame buffers respectively
-// Accumulation buffer
-alignas(64) static float* accumR;
-alignas(64) static float* accumG;
-alignas(64) static float* accumB;
+// Use a single struct for pixel data
+struct alignas(16) PixelData { float r, g, b, a; };
 
-// Final frame buffer
-alignas(64) static float* frameRGB;
+alignas(64) static PixelData* frameBuffer = nullptr;
 
 struct Hit {
     float t;
@@ -1066,54 +1062,30 @@ void renderTile(int startY, int endY, int frameIndex)
 
         trace4(ro, rd, col, rng);
 
+        float scale = 1.0f / (float)(currentFrame + 1);
+        float32x4_t vScale = vdupq_n_f32(scale);
+
         for(int k = 0; k < 4; k++)
         {
             // NEON based vectorized accumulation
-            int i = base;
-        
-            // Load accumulators
-            float32x4_t r = vld1q_f32(&accumR[i]);
-            float32x4_t g = vld1q_f32(&accumG[i]);
-            float32x4_t b = vld1q_f32(&accumB[i]);    
-            
-            // Load samples
-            float sr_arr[4] = { col[0].x, col[1].x, col[2].x, col[3].x };
-            float sg_arr[4] = { col[0].y, col[1].y, col[2].y, col[3].y };
-            float sb_arr[4] = { col[0].z, col[1].z, col[2].z, col[3].z };
+            int idx = base + k;
 
-            float32x4_t sr = vld1q_f32(sr_arr);
-            float32x4_t sg = vld1q_f32(sg_arr);
-            float32x4_t sb = vld1q_f32(sb_arr);
+            // Load pixels accumulation state into a single register
+            float32x4_t old_pix = vld1q_f32((float*)&frameBuffer[idx]);
 
-            // Inv frame
-            float32x4_t invF = vdupq_n_f32(1.0f / float(currentFrame + 1));
+            // create a vector for traced sample
+            float32x4_t new_samp = { col[k].x, col[k].y, col[k].z, 1.0f };
 
-            // Update accumulation
-            r = vmlaq_f32(r, vsubq_f32(sr, r), invF);
-            g = vmlaq_f32(g, vsubq_f32(sg, g), invF);
-            b = vmlaq_f32(b, vsubq_f32(sb, b), invF);
+            // Blend pixel data
+            float32x4_t diff = vsubq_f32(new_samp, old_pix);
+            float32x4_t blended = vmlaq_f32(old_pix, diff, vScale);
 
-            // Store values
-            vst1q_f32(&accumR[i], r);
-            vst1q_f32(&accumG[i], g);
-            vst1q_f32(&accumB[i], b);
+            // Force an alpha value of 1 to make sure accumulation doesn't exlode
+            float* bptr = (float*)&blended;
+            bptr[3] = 1.0f;
 
-            // Copy to FB
-            float rr[4], gg[4], bb[4];
-            vst1q_f32(rr, r);
-            vst1q_f32(gg, g);
-            vst1q_f32(bb, b);
-
-            for(int lane=0; lane<4; lane++)
-            {
-                int idx = i + lane;
-                int o = idx * 3;
-
-                frameRGB[o+0] = rr[lane];
-                frameRGB[o+1] = gg[lane];
-                frameRGB[o+2] = bb[lane];
-            }
-
+            // Write results
+            vst1q_f32((float*)&frameBuffer[idx], blended);
         }
     }
 }
@@ -1210,7 +1182,7 @@ void CPURTSceneinit(){
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -1280,21 +1252,12 @@ void CPURTSceneinit(){
     // Setup CPU for output
     int total = width * height;
 
-    // Allocate proper memory for buffers
-    accumR = (float*)aligned_alloc(64, total * sizeof(float));
-    accumG = (float*)aligned_alloc(64, total * sizeof(float));
-    accumB = (float*)aligned_alloc(64, total * sizeof(float));
+    // Allocate proper memory for CPU frame buffer
+    frameBuffer = (PixelData*)aligned_alloc(64, total * sizeof(PixelData));
 
-    frameRGB = (float*)aligned_alloc(64, total * 3 * sizeof(float));
+    // Zero out buffer
+    memset(frameBuffer, 0, total * sizeof(PixelData));
 
-    // init buffers
-    for(int i = 0; i < total; i++) {
-        accumR[i] = accumG[i] = accumB[i] = 0.0f;
-    }
-
-    for (int i = 0; i < total*3; i++) {
-        frameRGB[i] = 0.0f;
-    }
 
     glGenTextures(1, &screenTex);
     glBindTexture(GL_TEXTURE_2D, screenTex);
@@ -1397,9 +1360,6 @@ void CPURTRender(){
     // draw CPU functions
     renderCPUFrame();
 
-
-    int total = width * height;
-
     // draw our first triangle
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(s_program);
@@ -1408,7 +1368,7 @@ void CPURTRender(){
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, screenTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, frameRGB);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, frameBuffer);
     glBindVertexArray(0);
     glBindVertexArray(s_vao);
     
@@ -1451,11 +1411,7 @@ void CPURTExit()
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
 
-    free(accumR);
-    free(accumG);
-    free(accumB);
-
-    free(frameRGB);
+    free(frameBuffer);
     // cpuAccum.clear();
     // cpuFrame.clear();
     frame = 0; 
