@@ -204,6 +204,9 @@ static GLuint s_textProgram = 0;
 static GLuint s_textVao = 0;
 static GLuint s_textVbo = 0;
 
+static float* s_textVertexData = nullptr;
+static const int TEXT_BUFFER_FLOATS = 100 * 64 * 6 * 5;
+
 static const unsigned char font8x8[11][8] = {
     {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
     {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
@@ -233,6 +236,9 @@ static void initTextRenderer() {
     
     glGenVertexArrays(1, &s_textVao);
     glGenBuffers(1, &s_textVbo);
+
+    s_textVertexData = (float*)aligned_alloc(64,
+    TEXT_BUFFER_FLOATS * sizeof(float));
 }
 
 static void drawTextPixel(float x, float y, float size, float r, float g, float b, float* vertexData, int* offset) {
@@ -267,7 +273,7 @@ static void drawChar(char c, float x, float y, float scale, float r, float g, fl
 }
 
 static void drawText(const char* text, float x, float y, float scale, float r, float g, float b) {
-    float* vertexData = (float*)malloc(100 * 64 * 6 * 5 * sizeof(float));
+    float* vertexData = s_textVertexData;
     int offset = 0;
     float cx = x;
     
@@ -291,7 +297,6 @@ static void drawText(const char* text, float x, float y, float scale, float r, f
         glDrawArrays(GL_TRIANGLES, 0, offset / 5);
     }
     
-    free(vertexData);
 }
 
 static void cleanupTextRenderer() {
@@ -306,6 +311,11 @@ static void cleanupTextRenderer() {
     if(s_textProgram) {
         glDeleteProgram(s_textProgram);
         s_textProgram = 0;
+    }
+    if(s_textVertexData)
+    {
+        free(s_textVertexData);
+        s_textVertexData = nullptr;
     }
 }
 
@@ -417,7 +427,7 @@ static GLuint screenTex;
 float u_time;
 
 // Vars for multithreading
-static const int THREAD_COUNT = 3;
+static const int THREAD_COUNT = 2;
 static std::atomic<int> nextTile(0);
 
 static std::thread workers[THREAD_COUNT];
@@ -666,11 +676,17 @@ inline vec3x4 pack4(const vec3f* v)
 
 inline void unpack4(const vec3x4& v, vec3f* out)
 {
+    float xx[4], yy[4], zz[4];
+
+    vst1q_f32(xx, v.x);
+    vst1q_f32(yy, v.y);
+    vst1q_f32(zz, v.z);
+
     for(int i = 0; i < 4; i++)
     {
-        out[i].x = vgetq_lane_f32(v.x, i);
-        out[i].y = vgetq_lane_f32(v.y, i);
-        out[i].z = vgetq_lane_f32(v.z, i);
+        out[i].x = xx[i];
+        out[i].y = yy[i];
+        out[i].z = zz[i];
     }
 }
 
@@ -705,12 +721,7 @@ alignas(64) static float* accumG;
 alignas(64) static float* accumB;
 
 // Final frame buffer
-alignas(64) static float* frameR;
-alignas(64) static float* frameG;
-alignas(64) static float* frameB;
-
-// Since we still use OGL to display our image, a conversion from raw values to RGB is needed
-static std::vector<float> interleaved;
+alignas(64) static float* frameRGB;
 
 struct Hit {
     float t;
@@ -902,95 +913,268 @@ vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
     return color;
 }
 
-// N E O N T I E M
-void trace4(
-    const vec3f ro[4],
-    const vec3f rd[4],
-    vec3f outColor[4],
-    uint32_t rng[4])
+// Neon scene intersection
+inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, uint32x4_t& mat, vec3x4& normal)
 {
-    vec3f color[4] = {
-        vec3f(0), vec3f(0), vec3f(0), vec3f(0)
-    };
+    const float32x4_t INF = vdupq_n_f32(1e30f);
+    const float32x4_t ZERO = vdupq_n_f32(0.0f);
+    const float32x4_t EPS = vdupq_n_f32(1e-4f);
 
-    vec3f throughput[4] = {
-        vec3f(1), vec3f(1), vec3f(1), vec3f(1)
-    };
+    t = INF;
+    mat = vdupq_n_u32(WHITE);
+    normal.x = normal.y = normal.z = ZERO;
 
-    vec3f ro_l[4], rd_l[4];
-
-    for(int i = 0; i < 4; i++)
+    // Sphere center (0, 1, -0.5) r = 1
     {
-        ro_l[i] = ro[i];
-        rd_l[i] = rd[i];
+        const float32x4_t cx = vdupq_n_f32(0.0f);
+        const float32x4_t cy = vdupq_n_f32(1.0f);
+        const float32x4_t cz = vdupq_n_f32(-0.5f);
+
+        vec3x4 oc;
+        oc.x = vsubq_f32(ro.x, cx);
+        oc.y = vsubq_f32(ro.y, cy);
+        oc.z = vsubq_f32(ro.z, cz);
+
+        float32x4_t b = dot(oc, rd);
+        float32x4_t c = vsubq_f32(dot(oc, oc), vdupq_n_f32(1.0f));
+        float32x4_t h = vsubq_f32(vmulq_f32(b, b), c);
+
+        uint32x4_t  hasHit = vcgtq_f32(h, ZERO);
+        float32x4_t sqH = vsqrtq_f32(vmaxq_f32(h, ZERO));
+
+        // Near/Far roots
+        float32x4_t t0 = vsubq_f32(vnegq_f32(b), sqH);
+        float32x4_t t1 = vaddq_f32(vnegq_f32(b), sqH);   
+
+        // Even if this should never happen as the scene is static,
+        // If near root is behind the camera, fall back to far root
+        uint32x4_t useNear = vcgtq_f32(t0, EPS);
+        float32x4_t tS = vbslq_f32(useNear, t0, t1); 
+
+        uint32x4_t valid = vandq_u32(hasHit, vcgtq_f32(tS, EPS));
+        uint32x4_t closer = vcltq_f32(tS, t);
+        uint32x4_t mask = vandq_u32(valid, closer);
+
+        // Hit positons/normals, only compute them where the mask is set
+        vec3x4 hp;
+        hp.x = vmlaq_f32(ro.x, rd.x, tS);
+        hp.y = vmlaq_f32(ro.y, rd.y, tS);
+        hp.z = vmlaq_f32(ro.z, rd.z, tS);
+
+        vec3x4 n;
+        n.x = vsubq_f32(hp.x, cx);
+        n.y = vsubq_f32(hp.y, cy);
+        n.z = vsubq_f32(hp.z, cz);
+        n = normalize(n);
+
+        t = vbslq_f32(mask, tS, t);
+        mat = vbslq_u32(mask, vdupq_n_u32(MIRROR), mat);
+        normal.x = vbslq_f32(mask, n.x, normal.x);
+        normal.y = vbslq_f32(mask, n.y, normal.y);
+        normal.z = vbslq_f32(mask, n.z, normal.z);
     }
 
-    // path bounces
-    for(int bounce = 0; bounce < 3; bounce++)
+    // Test the same pattern for every wall, since they are static 
+    auto testPlane = [&] (float32x4_t roAxis, float32x4_t rdAxis, float target, float nx, float ny, float nz, uint32_t material)
     {
+        float32x4_t denom = rdAxis;
+        float32x4_t tP = vdivq_f32(vsubq_f32(vdupq_n_f32(target), roAxis), denom);
+
+        uint32x4_t notParallel = vcgtq_f32(vabsq_f32(denom), EPS);
+        uint32x4_t ahead = vcgtq_f32(tP, EPS);
+        uint32x4_t closer = vcltq_f32(tP, t);
+        uint32x4_t mask = vandq_u32(notParallel, vandq_u32(ahead, closer));
+
+        t = vbslq_f32(mask, tP, t);
+        mat = vbslq_u32(mask, vdupq_n_u32(material), mat);
+        normal.x = vbslq_f32(mask, vdupq_n_f32(nx), normal.x);
+        normal.y = vbslq_f32(mask, vdupq_n_f32(ny), normal.y);
+        normal.z = vbslq_f32(mask, vdupq_n_f32(nz), normal.z);   
+    };
+
+    // Floor @y = 0
+    testPlane(ro.y, rd.y, 0.0f, 0, 1, 0, WHITE);
+
+    // Ceiling @y = 4 
+    {
+        float32x4_t denom = rd.y;
+        float32x4_t tP = vdivq_f32(vsubq_f32(vdupq_n_f32(4.0f), ro.y), denom);
+
+        uint32x4_t notParallel = vcgtq_f32(vabsq_f32(denom), EPS);
+        uint32x4_t ahead = vcgtq_f32(tP, EPS);
+        uint32x4_t closer = vcltq_f32(tP, t);
+        uint32x4_t mask = vandq_u32(notParallel, vandq_u32(ahead, closer));
+
+        // Compute x/y hits to find light point vs white
+        float32x4_t hx = vmlaq_f32(ro.x, rd.x, tP);
+        float32x4_t hz = vmlaq_f32(ro.z, rd.z, tP);
+        uint32x4_t inX = vcltq_f32(vabsq_f32(hx), vdupq_n_f32(1.0f));
+        uint32x4_t inZ = vcltq_f32(vabsq_f32(hz), vdupq_n_f32(1.0f));
+        uint32x4_t isLightPanel = vandq_u32(inX, inZ);
+        uint32x4_t ceilMat = vbslq_u32(isLightPanel, vdupq_n_u32(LIGHT), vdupq_n_u32(WHITE));
+
+        t = vbslq_f32(mask, tP, t);
+        mat = vbslq_u32(mask, ceilMat, mat);
+        normal.x = vbslq_f32(mask, vdupq_n_f32(0.0f), normal.x);
+        normal.y = vbslq_f32(mask, vdupq_n_f32(-1.0f), normal.y);
+        normal.z = vbslq_f32(mask, vdupq_n_f32(0.0f), normal.z);
+    }
+
+    // Left wall
+    testPlane(ro.x, rd.x, -2.0f, +1, 0, 0, RED);
+    
+    // Right wall
+    testPlane(ro.x, rd.x, +2.0f, -1, 0, 0, GREEN);
+
+    // Back wall
+    testPlane(ro.z, rd.z, +2.0f, 0, 0, -1, WHITE);
+}
+
+// N E O N T I E M
+void trace4(const vec3f ro_in[4], const vec3f rd_in[4], vec3f outColor[4], uint32_t rng[4])
+{
+    // Pack scalars into SOA NEON
+    vec3x4 ro = pack4(ro_in);
+    vec3x4 rd = pack4(rd_in);
+
+    // Accumnulation registers
+    vec3x4 color;
+    color.x = color.y = color.z = vdupq_n_f32(0.0f);
+
+    vec3x4 throughput;
+    throughput.x = throughput.y = throughput.z = vdupq_n_f32(1.0f);
+
+    // Define alive, lines that still need bounces
+    uint32x4_t alive = vdupq_n_u32(0xFFFFFFFF);
+
+    const float32x4_t BIAS = vdupq_n_f32(0.001f);
+
+    for(int bounce = 0; bounce <3; bounce++)
+    {
+        // If all lines are dead, stop
+        uint32_t aliveAny[4];
+        vst1q_u32(aliveAny, alive);
+        if(!(aliveAny[0] | aliveAny[1] | aliveAny[2] | aliveAny[3])) break;
+
+        float32x4_t t;
+        uint32x4_t mat;
+        vec3x4 normal;
+        intersectScene4(ro, rd, t, mat, normal);
+
+        uint32x4_t hit = vcltq_f32(t, vdupq_n_f32(1e29f));
+        uint32x4_t miss = vandq_u32(alive, vmvnq_u32(hit));
+
+        //Add a sky color for any lanes we miss
+        color.x = vbslq_f32(miss, vaddq_f32(color.x, vmulq_f32(throughput.x, vdupq_n_f32(0.7f))), color.x);
+        color.y = vbslq_f32(miss, vaddq_f32(color.y, vmulq_f32(throughput.y, vdupq_n_f32(0.8f))), color.y);
+        color.z = vbslq_f32(miss, vaddq_f32(color.z, vmulq_f32(throughput.z, vdupq_n_f32(1.0f))), color.z);
+        // Kill missed lanes
+        alive = vandq_u32(alive, hit);
+
+        // Hit position
+        vec3x4 pos;
+        pos.x = vmlaq_f32(ro.x, rd.x, t);
+        pos.y = vmlaq_f32(ro.y, rd.y, t);
+        pos.z = vmlaq_f32(ro.z, rd.z, t);
+
+        // Material masks
+        uint32x4_t isLight = vandq_u32(alive, vceqq_u32(mat, vdupq_n_u32(LIGHT)));
+        uint32x4_t isMirror = vandq_u32(alive, vceqq_u32(mat, vdupq_n_u32(MIRROR)));
+        uint32x4_t isDiff = vandq_u32(alive, vmvnq_u32(vorrq_u32(vceqq_u32(mat, vdupq_n_u32(LIGHT)), vceqq_u32(mat, vdupq_n_u32(MIRROR)))));
+
+        // Light
+        color.x = vbslq_f32(isLight, vaddq_f32(color.x, vmulq_f32(throughput.x, vdupq_n_f32(6.0f))), color.x);
+        color.y = vbslq_f32(isLight, vaddq_f32(color.y, vmulq_f32(throughput.y, vdupq_n_f32(6.0f))), color.y);
+        color.z = vbslq_f32(isLight, vaddq_f32(color.z, vmulq_f32(throughput.z, vdupq_n_f32(6.0f))), color.z);
+        // Kill light lanes
+        alive = vandq_u32(alive, vmvnq_u32(isLight));
+
+        // Mirror reflection, no throughput changes
+        vec3x4 refl = reflect(rd, normal);
+        rd.x = vbslq_f32(isMirror, refl.x, rd.x);
+        rd.y = vbslq_f32(isMirror, refl.y, rd.y);
+        rd.z = vbslq_f32(isMirror, refl.z, rd.z);
+
+        // Build albedo from material per lane for diffuse
+        // White = 0.9, red = 1,0.2,0.2, geen = 0.2,1,0.2
+        uint32x4_t isWhite = vceqq_u32(mat, vdupq_n_u32(WHITE));
+        uint32x4_t isRed = vceqq_u32(mat, vdupq_n_u32(RED));
+        uint32x4_t isGreen = vceqq_u32(mat, vdupq_n_u32(GREEN));
+
+        float32x4_t albR = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vbslq_f32(isRed, vdupq_n_f32(1.0f), vdupq_n_f32(0.2f)));
+        float32x4_t albG = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vbslq_f32(isRed, vdupq_n_f32(0.2f), vdupq_n_f32(1.0f)));
+        float32x4_t albB = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vdupq_n_f32(0.2f));
+
+        throughput.x = vbslq_f32(isDiff, vmulq_f32(throughput.x, albR), throughput.x);
+        throughput.y = vbslq_f32(isDiff, vmulq_f32(throughput.y, albG), throughput.y);
+        throughput.z = vbslq_f32(isDiff, vmulq_f32(throughput.z, albB), throughput.z);
+
+        // Diffuse bounce direction
+        // We use scalars per lane as RNG isn't easily vectorized
+        // Extract normals to scalar for building
+        float nx[4], ny[4], nz[4];
+        vst1q_f32(nx, normal.x);
+        vst1q_f32(ny, normal.y);
+        vst1q_f32(nz, normal.z);
+
+        uint32_t diffMask[4];
+        vst1q_u32(diffMask, isDiff);
+
+        float newRx[4], newRy[4], newRz[4];
+        vst1q_f32(newRx, rd.x);
+        vst1q_f32(newRy, rd.y);
+        vst1q_f32(newRz, rd.z);
+
         for(int i = 0; i < 4; i++)
         {
-            Hit h = intersectScene(ro_l[i], rd_l[i]);
+            if(!diffMask[i]) continue;
 
-            if(h.t < 0.0f)
-            {
-                color[i].x += throughput[i].x * 0.7f;
-                color[i].y += throughput[i].y * 0.8f;
-                color[i].z += throughput[i].z * 1.0f;
-                continue;
-            }
+            // Sphere sampling
+            float rx, ry, rz, len2;
+            do {
+                rx = randFloat(rng[i]) * 2.0f - 1.0f;
+                ry = randFloat(rng[i]) * 2.0f - 1.0f;
+                rz = randFloat(rng[i]) * 2.0f - 1.0f;
+                len2 = rx*rx + rz*rz;
+            } while(len2 > 1.0f || len2 < 1e-6f);
 
-            vec3f pos = {
-                ro_l[i].x + rd_l[i].x * h.t,
-                ro_l[i].y + rd_l[i].y * h.t,
-                ro_l[i].z + rd_l[i].z * h.t
-            };
+            // Flip hemisphere
+            if(rx*nx[i] + ry*ny[i] + rz*nz[i] < 0.0f)
+            { rx = -rx; ry = -ry; rz = -rz; }
 
-            if(h.mat == LIGHT){
-                color[i].x += throughput[i].x * 6.0f;
-                color[i].y += throughput[i].y * 6.0f;
-                color[i].z += throughput[i].z * 6.0f;
-                continue;
-            }      
-            if(h.mat == MIRROR)
-            {
-                rd_l[i] = neon_reflect(rd_l[i], h.normal);
-            }
-            else
-            {
-                uint32_t& s = rng[i];
-
-                vec3f r = {
-                    randFloat(s) * 2.0f - 1.0f,
-                    randFloat(s) * 2.0f - 1.0f,
-                    randFloat(s) * 2.0f - 1.0f
-                };
-
-                r = neon_normalize(r);
-
-                rd_l[i] = neon_normalize({
-                    h.normal.x + r.x,
-                    h.normal.y + r.y,
-                    h.normal.z + r.z
-                });
-
-                vec3f c = getColor(h.mat);
-
-                throughput[i].x *= c.x;
-                throughput[i].y *= c.y;
-                throughput[i].z *= c.z;
-            }
-
-            ro_l[i] = {
-                pos.x + h.normal.x * 0.001f,
-                pos.y + h.normal.y * 0.001f,
-                pos.z + h.normal.z * 0.001f
-            };
+            // normalize n+r
+            float dx = nx[i] + rx;
+            float dy = ny[i] + ry;
+            float dz = nz[i] + rz;
+            float l2 = dx*dx + dy*dy + dz*dz;
+            float inv = 1.0f / sqrtf(l2 + 1e-20f);
+            newRx[i] = dx * inv;
+            newRy[i] = dy * inv;
+            newRz[i] = dz * inv;
         }
+
+        // Write back diffuse directions
+        // Not needed for mirror lanes as they are already updated
+        float32x4_t drx = vld1q_f32(newRx);
+        float32x4_t dry = vld1q_f32(newRy);
+        float32x4_t drz = vld1q_f32(newRz);
+        rd.x = vbslq_f32(isDiff, drx, rd.x);
+        rd.y = vbslq_f32(isDiff, dry, rd.y);
+        rd.z = vbslq_f32(isDiff, drz, rd.z);
+
+        // Advance rays off the surface
+        ro.x = vmlaq_f32(pos.x, normal.x, BIAS);
+        ro.y = vmlaq_f32(pos.y, normal.y, BIAS);
+        ro.z = vmlaq_f32(pos.z, normal.z, BIAS);
     }
 
+    // Unpack results
+    float cr[4], cg[4], cb[4];
+    vst1q_f32(cr, color.x);
+    vst1q_f32(cg, color.y);
+    vst1q_f32(cb, color.z);
     for(int i = 0; i < 4; i++)
-        outColor[i] = color[i];
+        outColor[i] = { cr[i], cg[i], cb[i] };
 }
 
 static vec3f camForward;
@@ -1099,15 +1283,32 @@ void renderTile(int startY, int endY, int frameIndex)
             vst1q_f32(sx_arr, sx);
             vst1q_f32(sy_arr, sy);
 
-            for(int k = 0; k < 4; k++){
-                ro[k] = camPos;
+            vec3x4 ro4, rd4;
 
-                rd[k] = normalize(camForward + camRight * sx_arr[k] + camUp * sy_arr[k]);
+            // Replicate origin
+            ro4.x = vdupq_n_f32(camPos.x);
+            ro4.y = vdupq_n_f32(camPos.y);
+            ro4.z = vdupq_n_f32(camPos.z);
 
+            // Direction -> forward + right * sx + up * sx
+            rd4.x = vaddq_f32(vdupq_n_f32(camForward.x), vaddq_f32(vmulq_n_f32(sx, camRight.x), vmulq_n_f32(sy, camUp.x)));
+            rd4.y = vaddq_f32(vdupq_n_f32(camForward.y), vaddq_f32(vmulq_n_f32(sx, camRight.y), vmulq_n_f32(sy, camUp.y)));
+            rd4.z = vaddq_f32(vdupq_n_f32(camForward.z), vaddq_f32(vmulq_n_f32(sx, camRight.z), vmulq_n_f32(sy, camUp.z)));
+
+            // Normalize packets
+            rd4 = normalize(rd4);
+
+            // Rng still needed
+            for(int k=0;k<4;k++)
+            {
                 int idx = base + k;
                 rng[k] = seed(idx, currentFrame);
             }
-        
+
+        // convert for trace
+        unpack4(ro4, ro);
+        unpack4(rd4, rd);
+
 
         trace4(ro, rd, col, rng);
 
@@ -1144,9 +1345,20 @@ void renderTile(int startY, int endY, int frameIndex)
             vst1q_f32(&accumB[i], b);
 
             // Copy to FB
-            vst1q_f32(&frameR[i], r);
-            vst1q_f32(&frameG[i], g);
-            vst1q_f32(&frameB[i], b);
+            float rr[4], gg[4], bb[4];
+            vst1q_f32(rr, r);
+            vst1q_f32(gg, g);
+            vst1q_f32(bb, b);
+
+            for(int lane=0; lane<4; lane++)
+            {
+                int idx = i + lane;
+                int o = idx * 3;
+
+                frameRGB[o+0] = rr[lane];
+                frameRGB[o+1] = gg[lane];
+                frameRGB[o+2] = bb[lane];
+            }
 
         }
     }
@@ -1157,7 +1369,7 @@ void renderTile(int startY, int endY, int frameIndex)
 // Each pixel writes around 32b
 // Width is at 1280, so at 1280x16 the total size per thread is 655KB
 // TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
-const int TILE_H = 16;
+const int TILE_H = 8;
 
 void workerThread(int id)
 {
@@ -1175,15 +1387,22 @@ void workerThread(int id)
 
         while (true)
         {
-            int tile = nextTile.fetch_add(1, std::memory_order_relaxed);
-            int startY = tile * TILE_H;
+            int tileBase = nextTile.fetch_add(2, std::memory_order_relaxed);
 
-            if (startY >= height) break;
+            for (int t = 0; t < 2; t++)
+            {
+                int tile = tileBase + t;
+                int startY = tile * TILE_H;
 
-            int endY = std::min(startY + TILE_H, height);
-            renderTile(startY, endY, currentFrame);
+                if (startY >= height)
+                    goto worker_done;
+                
+                int endY = std::min(startY + TILE_H, height);
+                renderTile(startY, endY, currentFrame);
+    
+            }
         }
-
+        worker_done:
         tilesDone.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -1312,17 +1531,15 @@ void CPURTSceneinit(){
     accumG = (float*)aligned_alloc(64, total * sizeof(float));
     accumB = (float*)aligned_alloc(64, total * sizeof(float));
 
-    frameR = (float*)aligned_alloc(64, total * sizeof(float));
-    frameG = (float*)aligned_alloc(64, total * sizeof(float));
-    frameB = (float*)aligned_alloc(64, total * sizeof(float));
+    frameRGB = (float*)aligned_alloc(64, total * 3 * sizeof(float));
 
     // init buffers
     for(int i = 0; i < total; i++) {
         accumR[i] = accumG[i] = accumB[i] = 0.0f;
     }
 
-    for (int i = 0; i < total; i++) {
-        frameR[i] = frameG[i] = frameB[i] = 0.0f;
+    for (int i = 0; i < total*3; i++) {
+        frameRGB[i] = 0.0f;
     }
 
     glGenTextures(1, &screenTex);
@@ -1355,24 +1572,33 @@ void renderCPUFrame()
 
     workCV.notify_all();
 
-    // Main thread also pulls tiles
+    // Main thread used as a worker
     while (true)
     {
-        int tile = nextTile.fetch_add(1, std::memory_order_relaxed);
-        int startY = tile * TILE_H;
+        int tileBase = nextTile.fetch_add(2, std::memory_order_relaxed);
 
-        if (startY >= height)
-            break;
+        bool finished = false;
 
-        int endY = startY + TILE_H;
-        if (endY > height) endY = height;
+        for(int t = 0; t < 2; t++)
+        {
+            int tile = tileBase + t;
+            int startY = tile * TILE_H;
 
-        renderTile(startY, endY, currentFrame);
+            if (startY >= height)
+            {
+                finished = true; 
+                break;
+            }
+            int endY = std::min(startY + TILE_H, height);
+            renderTile(startY, endY, currentFrame);
+        }
+        if (finished) break;
     }
 
     // Wait for workers to finish
     while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
     {
+        svcSleepThread(1000);
     }
 
     workReady = false;
@@ -1419,23 +1645,16 @@ void CPURTRender(){
 
 
     int total = width * height;
-    interleaved.resize(total * 3);
 
     // draw our first triangle
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(s_program);
     glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
 
-    
-    for(int i = 0; i < total; i ++) {
-        interleaved[i * 3 + 0] = frameR[i];
-        interleaved[i * 3 + 1] = frameG[i];
-        interleaved[i * 3 + 2] = frameB[i];
-    }
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, screenTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, interleaved.data());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, frameRGB);
     glBindVertexArray(0);
     glBindVertexArray(s_vao);
     
@@ -1482,9 +1701,7 @@ void CPURTExit()
     free(accumG);
     free(accumB);
 
-    free(frameR);
-    free(frameG);
-    free(frameB);
+    free(frameRGB);
     // cpuAccum.clear();
     // cpuFrame.clear();
     frame = 0; 
