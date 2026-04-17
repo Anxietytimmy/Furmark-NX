@@ -473,6 +473,7 @@ struct alignas(16) PixelData { float r, g, b, a; };
 
 alignas(64) static PixelData* frameBuffer = nullptr;
 
+
 struct Hit {
     float t;
     Material mat;
@@ -1283,31 +1284,19 @@ void renderCPUFrame()
     while (true)
     {
         int tileBase = nextTile.fetch_add(2, std::memory_order_relaxed);
+        int startY = tileBase * TILE_H;
 
-        bool finished = false;
+        if (startY >= height) break;
 
-        for(int t = 0; t < 2; t++)
-        {
-            int tile = tileBase + t;
-            int startY = tile * TILE_H;
-
-            if (startY >= height)
-            {
-                finished = true; 
-                break;
-            }
-            int endY = std::min(startY + TILE_H, height);
-            renderTile(startY, endY, currentFrame);
-        }
-        if (finished) break;
+        int endY = std::min(startY + (2 * TILE_H), height);
+        renderTile(startY, endY, currentFrame);
     }
 
     // Wait for workers to finish
     while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
     {
-        svcSleepThread(1000);
+        __asm__ volatile("yield" ::: "memory");    
     }
-
     workReady = false;
 }
 
