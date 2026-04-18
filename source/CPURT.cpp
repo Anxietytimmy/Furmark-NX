@@ -781,8 +781,9 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
     testPlane(ro.z, rd.z, +2.0f, 0, 0, -1, WHITE);
 }
 
+
 // N E O N T I E M
-void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
+inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
 {
     // Accumnulation registers
     vec3x4 color;
@@ -805,6 +806,17 @@ void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
         uint32x4_t mat;
         vec3x4 normal;
         intersectScene4(ro, rd, t, mat, normal);
+
+        // abysmal dogshit 
+        float32x4_t junk0 = vmulq_f32(t, t);
+        float32x4_t junk1 = vaddq_f32(junk0, throughput.x);
+        float32x4_t junk2 = vsqrtq_f32(vabsq_f32(junk1));
+        throughput.x = vaddq_f32(throughput.x, vmulq_n_f32(junk2, 0.00001f));
+ 
+
+        // Scalent
+        volatile float heat = 0.0f;
+        heat += sqrtf((bounce + 1.1f) * 7.31f);
 
         uint32x4_t hit = vcltq_f32(t, vdupq_n_f32(1e29f));
         uint32x4_t miss = vandq_u32(alive, vmvnq_u32(hit));
@@ -1083,7 +1095,8 @@ void renderTile(int startY, int endY, int frameIndex)
 // Each pixel writes around 32b
 // Width is at 1280, so at 1280x16 the total size per thread is 655KB
 // TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
-const int TILE_H = 16;
+// HOWEVER, this assumes tiles only include pixel data, which lmao
+const int TILE_H = 8;
 
 void workerThread(int id)
 {
@@ -1117,7 +1130,7 @@ void workerThread(int id)
             }
         }
         worker_done:
-        tilesDone.fetch_add(1, std::memory_order_relaxed);
+        tilesDone.fetch_add(2, std::memory_order_relaxed);
     }
 }
 
