@@ -729,7 +729,8 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
     auto testPlane = [&] (float32x4_t roAxis, float32x4_t rdAxis, float target, float nx, float ny, float nz, uint32_t material)
     {
         float32x4_t denom = rdAxis;
-        float32x4_t tP = vdivq_f32(vsubq_f32(vdupq_n_f32(target), roAxis), denom);
+        float32x4_t num = vsubq_f32(vdupq_n_f32(target), roAxis);
+        float32x4_t tP = vmulq_f32(num, fastRecip(denom));
 
         uint32x4_t notParallel = vcgtq_f32(vabsq_f32(denom), EPS);
         uint32x4_t ahead = vcgtq_f32(tP, EPS);
@@ -749,7 +750,8 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
     // Ceiling @y = 4 
     {
         float32x4_t denom = rd.y;
-        float32x4_t tP = vdivq_f32(vsubq_f32(vdupq_n_f32(4.0f), ro.y), denom);
+        float32x4_t num = vsubq_f32(vdupq_n_f32(4.0f), ro.y);
+        float32x4_t tP = vmulq_f32(num, fastRecip(denom));
 
         uint32x4_t notParallel = vcgtq_f32(vabsq_f32(denom), EPS);
         uint32x4_t ahead = vcgtq_f32(tP, EPS);
@@ -1006,12 +1008,16 @@ void renderTile(int startY, int endY, int frameIndex)
     const float32x4_t invH = vdupq_n_f32(1.0f / height);
     const float aspect = float(width) / float(height);
 
+    const float32x4_t half = vdupq_n_f32(0.5f);
+    const float32x4_t two  = vdupq_n_f32(2.0f);
+    const float32x4_t one  = vdupq_n_f32(1.0f);
 
     for(int y = startY; y < endY; y++){
 
-    float32x4_t py = vdupq_n_f32(float(y) + 0.5f);
+    float32x4_t py = vdupq_n_f32(float(y));
+    py = vaddq_f32(py, half);
     float32x4_t uvy = vmulq_f32(py, invH);
-    float32x4_t sy = vsubq_f32(vmulq_n_f32(uvy, 2.0f), vdupq_n_f32(1.0f));
+    float32x4_t sy = vsubq_f32(vmulq_f32(uvy, two), one);
 
     for(int x = 0; x < width; x += 4)
     {
@@ -1027,14 +1033,10 @@ void renderTile(int startY, int endY, int frameIndex)
                 float(x + 2) + 0.5f,
                 float(x + 3) + 0.5f
             };
-            
-            // Convert to UV
-            float32x4_t invW = vdupq_n_f32(1.0f / width);
-            float32x4_t invH = vdupq_n_f32(1.0f / height);
 
             float32x4_t uvx = vmulq_f32(px, invW);
 
-            float32x4_t sx = vsubq_f32(vmulq_n_f32(uvx, 2.0f), vdupq_n_f32(1.0f));
+            float32x4_t sx = vsubq_f32(vmulq_f32(uvx, two), one);
 
             // correct aspect
             sx = vmulq_n_f32(sx, aspect);

@@ -247,3 +247,12 @@ inline void unpack4(const vec3x4& v, vec3f* out)
         out[i].z = zz[i];
     }
 }
+
+// fast reciprocals
+static inline float32x4_t fastRecip(float32x4_t x)
+{
+    float32x4_t r = vrecpeq_f32(x);
+    r = vmulq_f32(vrecpsq_f32(x, r), r);
+    r = vmulq_f32(vrecpsq_f32(x, r), r);
+    return r;
+}
