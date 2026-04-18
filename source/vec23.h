@@ -256,3 +256,32 @@ static inline float32x4_t fastRecip(float32x4_t x)
     r = vmulq_f32(vrecpsq_f32(x, r), r);
     return r;
 }
+
+// fast sqrt
+static inline float32x4_t fastRsqrt(float32x4_t x)
+{
+    float32x4_t r = vrsqrteq_f32(x);
+    r = vmulq_f32(r, vrsqrtsq_f32(vmulq_f32(x, r), r));
+    r = vmulq_f32(r, vrsqrtsq_f32(vmulq_f32(x, r), r));
+    return r;
+}
+
+// blursed
+static inline vec3x4 normalizeFast(const vec3x4& v)
+{
+    float32x4_t len2 =
+        vmlaq_f32(
+            vmulq_f32(v.z, v.z),
+            v.y,
+            v.y);
+
+    len2 = vmlaq_f32(len2, v.x, v.x);
+
+    float32x4_t invLen = fastRsqrt(len2);
+
+    vec3x4 out;
+    out.x = vmulq_f32(v.x, invLen);
+    out.y = vmulq_f32(v.y, invLen);
+    out.z = vmulq_f32(v.z, invLen);
+    return out;
+}

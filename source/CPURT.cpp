@@ -716,7 +716,7 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
         n.x = vsubq_f32(hp.x, cx);
         n.y = vsubq_f32(hp.y, cy);
         n.z = vsubq_f32(hp.z, cz);
-        n = normalize(n);
+        n = normalizeFast(n);
 
         t = vbslq_f32(mask, tS, t);
         mat = vbslq_u32(mask, vdupq_n_u32(MIRROR), mat);
@@ -879,47 +879,56 @@ inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
         uint32_t diffMask[4];
         vst1q_u32(diffMask, isDiff);
 
-        float newRx[4], newRy[4], newRz[4];
-        vst1q_f32(newRx, rd.x);
-        vst1q_f32(newRy, rd.y);
-        vst1q_f32(newRz, rd.z);
-
-        for(int i = 0; i < 4; i++)
+        // Only gen scalar randoms
+        float rx[4], ry[4], rz[4];
+        
+        for (int i = 0; i < 4; i++)
         {
-            if(!diffMask[i]) continue;
+            if(diffMask[i])
+            {
+                float x, y, z, l2;
 
-            // Sphere sampling
-            float rx, ry, rz, len2;
-            do {
-                rx = randFloat(rng[i]) * 2.0f - 1.0f;
-                ry = randFloat(rng[i]) * 2.0f - 1.0f;
-                rz = randFloat(rng[i]) * 2.0f - 1.0f;
-                len2 = rx*rx + ry*ry + rz*rz;
-            } while(len2 > 1.0f || len2 < 1e-6f);
+            do  {
+                    x = randFloat(rng[i]) * 2.0f - 1.0f;
+                    y = randFloat(rng[i]) * 2.0f - 1.0f;
+                    z = randFloat(rng[i]) * 2.0f - 1.0f;
+                    l2 = x*x + y*y + z*z;
+                }
 
-            // Flip hemisphere
-            if(rx*nx[i] + ry*ny[i] + rz*nz[i] < 0.0f)
-            { rx = -rx; ry = -ry; rz = -rz; }
+            while(l2 > 1.0f || l2 < 1e-6f);
 
-            // normalize n+r
-            float dx = nx[i] + rx;
-            float dy = ny[i] + ry;
-            float dz = nz[i] + rz;
-            float l2 = dx*dx + dy*dy + dz*dz;
-            float inv = 1.0f / sqrtf(l2 + 1e-20f);
-            newRx[i] = dx * inv;
-            newRy[i] = dy * inv;
-            newRz[i] = dz * inv;
+            if(x*nx[i] + y*ny[i] + z*nz[i] < 0.0f)
+            {
+                x = -x; y = -y; z = -z;
+            }
+
+            rx[i] = x;
+            ry[i] = y;
+            rz[i] = z;
+            }
+            else
+            {
+                rx[i] = ry[i] = rz[i] = 0.0f;
+            }
         }
 
-        // Write back diffuse directions
-        // Not needed for mirror lanes as they are already updated
-        float32x4_t drx = vld1q_f32(newRx);
-        float32x4_t dry = vld1q_f32(newRy);
-        float32x4_t drz = vld1q_f32(newRz);
-        rd.x = vbslq_f32(isDiff, drx, rd.x);
-        rd.y = vbslq_f32(isDiff, dry, rd.y);
-        rd.z = vbslq_f32(isDiff, drz, rd.z);
+        // load packet random vectors
+        float32x4_t vrx = vld1q_f32(rx);
+        float32x4_t vry = vld1q_f32(ry);
+        float32x4_t vrz = vld1q_f32(rz);
+
+        vec3x4 bounceX;
+        // diffuse dir = normalize(n + r)
+        bounceX.x = vaddq_f32(normal.x, vrx);
+        bounceX.y = vaddq_f32(normal.y, vry);
+        bounceX.z = vaddq_f32(normal.z, vrz);
+
+        bounceX = normalizeFast(bounceX);
+
+        // masked writeback
+        rd.x = vbslq_f32(isDiff, bounceX.x, rd.x);
+        rd.y = vbslq_f32(isDiff, bounceX.y, rd.y);
+        rd.z = vbslq_f32(isDiff, bounceX.z, rd.z);
 
         // Advance rays off the surface
         ro.x = vmlaq_f32(pos.x, normal.x, BIAS);
@@ -1054,7 +1063,7 @@ void renderTile(int startY, int endY, int frameIndex)
             rd4.z = vaddq_f32(vdupq_n_f32(camForward.z), vaddq_f32(vmulq_n_f32(sx, camRight.z), vmulq_n_f32(sy, camUp.z)));
 
             // Normalize packets
-            rd4 = normalize(rd4);
+            rd4 = normalizeFast(rd4);
 
             // Rng still needed
             for(int k=0;k<4;k++)
@@ -1065,29 +1074,34 @@ void renderTile(int startY, int endY, int frameIndex)
 
         trace4(ro4, rd4, col, rng);
 
-        float scale = 1.0f / (float)(currentFrame + 1);
+        float cr[4], cg[4], cb[4];
+        vst1q_f32(cr, vsetq_lane_f32(col[3].x,
+                vsetq_lane_f32(col[2].x,
+                vsetq_lane_f32(col[1].x,
+                vsetq_lane_f32(col[0].x, vdupq_n_f32(0.0f), 0),1),2),3));
+
+        vst1q_f32(cg, vsetq_lane_f32(col[3].y,
+                vsetq_lane_f32(col[2].y,
+                vsetq_lane_f32(col[1].y,
+                vsetq_lane_f32(col[0].y, vdupq_n_f32(0.0f), 0),1),2),3));
+
+        vst1q_f32(cb, vsetq_lane_f32(col[3].z,
+                vsetq_lane_f32(col[2].z,
+                vsetq_lane_f32(col[1].z,
+                vsetq_lane_f32(col[0].z, vdupq_n_f32(0.0f), 0),1),2),3));
+
+        float scale = 1.0f / float(currentFrame + 1);
         float32x4_t vScale = vdupq_n_f32(scale);
 
-        for(int k = 0; k < 4; k++)
+
+        for(int k=0;k<4;k++)
         {
-            // NEON based vectorized accumulation
             int idx = base + k;
 
-            // Load pixels accumulation state into a single register
-            float32x4_t old_pix = vld1q_f32((float*)&frameBuffer[idx]);
-
-            // create a vector for traced sample
-            float32x4_t new_samp = { col[k].x, col[k].y, col[k].z, 1.0f };
-
-            // Blend pixel data
-            float32x4_t diff = vsubq_f32(new_samp, old_pix);
-            float32x4_t blended = vmlaq_f32(old_pix, diff, vScale);
-
-            // Force an alpha value of 1 to make sure accumulation doesn't exlode
-            blended = vsetq_lane_f32(1.0f, blended, 3);
-
-            // Write results
-            vst1q_f32((float*)&frameBuffer[idx], blended);
+            frameBuffer[idx].r += (cr[k] - frameBuffer[idx].r) * scale;
+            frameBuffer[idx].g += (cg[k] - frameBuffer[idx].g) * scale;
+            frameBuffer[idx].b += (cb[k] - frameBuffer[idx].b) * scale;
+            frameBuffer[idx].a = 1.0f;
         }
     }
 }
