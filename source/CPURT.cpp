@@ -1295,7 +1295,7 @@ void renderCPUFrame()
     // Wait for workers to finish
     while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
     {
-        __asm__ volatile("yield" ::: "memory");    
+        __asm__ volatile("" ::: "memory");    
     }
     workReady = false;
 }
