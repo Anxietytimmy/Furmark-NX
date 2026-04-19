@@ -16,9 +16,6 @@
 #include <glm/gtc/constants.hpp>
 
 #include "stb_image.h"
-#include "fur_png.h"
-#include "noise_png.h"
-#include "wall_png.h"
 #include "sates.h"
 
 //-----------------------------------------------------------------------------
@@ -378,6 +375,7 @@ static const char* const fragmentShaderSource = R"text(
     struct Hit {
         float dist;
         int material;
+        vec3 normal;
     };
 
     // --------------------------------------------------
@@ -421,6 +419,7 @@ static const char* const fragmentShaderSource = R"text(
         if(s < h.dist){
             h.dist = s;
             h.material = MIRROR;
+            h.normal = normalize(p - vec3(0,1.0,-0.5));
         }
 
         // ---------- room walls (inward planes) ----------
@@ -430,6 +429,7 @@ static const char* const fragmentShaderSource = R"text(
         if(left < h.dist){
             h.dist = left;
             h.material = RED;
+            h.normal = vec3(1, 0, 0);
         }
 
         // right (green)
@@ -437,6 +437,7 @@ static const char* const fragmentShaderSource = R"text(
         if(right < h.dist){
             h.dist = right;
             h.material = GREEN;
+            h.normal = vec3(-1, 0, 0);
         }
 
         // floor
@@ -444,6 +445,7 @@ static const char* const fragmentShaderSource = R"text(
         if(floor < h.dist){
             h.dist = floor;
             h.material = WHITE;
+            h.normal = vec3(0, 1, 0);
         }
 
         // ceiling
@@ -451,6 +453,7 @@ static const char* const fragmentShaderSource = R"text(
         if(ceil < h.dist){
             h.dist = ceil;
             h.material = WHITE;
+            h.normal = vec3(0, -1, 0);
         }
 
         // back wall
@@ -458,6 +461,7 @@ static const char* const fragmentShaderSource = R"text(
         if(back < h.dist){
             h.dist = back;
             h.material = WHITE;
+            h.normal = vec3(0, 0, -1);
         }
 
         // ---------- ceiling light ----------
@@ -504,20 +508,6 @@ static const char* const fragmentShaderSource = R"text(
     }
 
     // --------------------------------------------------
-    // NORMAL FROM SDF
-    // --------------------------------------------------
-
-    vec3 getNormal(vec3 p)
-    {
-        float e = 0.001;
-        return normalize(vec3(
-            map(p+vec3(e,0,0)).dist - map(p-vec3(e,0,0)).dist,
-            map(p+vec3(0,e,0)).dist - map(p-vec3(0,e,0)).dist,
-            map(p+vec3(0,0,e)).dist - map(p-vec3(0,0,e)).dist
-        ));
-    }
-
-    // --------------------------------------------------
     // MATERIAL COLORS
     // --------------------------------------------------
 
@@ -552,7 +542,7 @@ static const char* const fragmentShaderSource = R"text(
             }
 
             vec3 pos = ro + rd*h.dist;
-            vec3 n = getNormal(pos);
+            vec3 n = h.normal;
 
             // hit light
             if(isLight(h.material)){
@@ -733,7 +723,7 @@ void GPUPTSceneInit()
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1280, 720, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, 1280, 720, 0, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 

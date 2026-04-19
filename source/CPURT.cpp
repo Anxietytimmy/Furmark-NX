@@ -1032,7 +1032,7 @@ void renderTile(int startY, int endY, int frameIndex)
     {
         int base = y * width + x;
 
-        vec3f ro[4], rd[4], col[4];
+        vec3f col[4];
         uint32_t rng[4];
             
             // pixel coord
