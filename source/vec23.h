@@ -28,7 +28,10 @@ struct Hit4 {
 
 // NEON Dot product
 inline float32x4_t dot(const vec3x4& a, const vec3x4& b){
-    return vmlaq_f32(vmlaq_f32(vmulq_f32(a.x, b.x), a.y, b.y), a.z, b.z);
+    float32x4_t acc = vmulq_f32(a.x, b.x);
+    acc = vfmaq_f32(acc, a.y, b.y);
+    acc = vfmaq_f32(acc, a.z, b.z);
+    return acc;
 }
 
 // Neon normalize

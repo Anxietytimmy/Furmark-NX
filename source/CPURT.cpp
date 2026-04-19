@@ -809,13 +809,6 @@ inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
         vec3x4 normal;
         intersectScene4(ro, rd, t, mat, normal);
 
-        // abysmal dogshit 
-        float32x4_t junk0 = vmulq_f32(t, t);
-        float32x4_t junk1 = vaddq_f32(junk0, throughput.x);
-        float32x4_t junk2 = vsqrtq_f32(vabsq_f32(junk1));
-        throughput.x = vaddq_f32(throughput.x, vmulq_n_f32(junk2, 0.00001f));
- 
-
         // Scalent
         volatile float heat = 0.0f;
         heat += sqrtf((bounce + 1.1f) * 7.31f);
