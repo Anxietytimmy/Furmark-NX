@@ -1032,6 +1032,10 @@ void renderTile(int startY, int endY, int frameIndex)
     {
         int base = y * width + x;
 
+        // Prefetch for FB
+        // (FB, [Base, px write ahead], write intent, locality)
+        __builtin_prefetch(&frameBuffer [base + 16], 1, 3);
+
         vec3f col[4];
         uint32_t rng[4];
             
@@ -1120,6 +1124,8 @@ void workerThread(int id)
     int core = id;
     pinThread(core);
 
+    constexpr int tnum = 4;
+
     while (running)
     {
         std::unique_lock<std::mutex> lock(workMutex);
@@ -1130,9 +1136,9 @@ void workerThread(int id)
 
         while (true)
         {
-            int tileBase = nextTile.fetch_add(2, std::memory_order_relaxed);
+            int tileBase = nextTile.fetch_add(tnum, std::memory_order_relaxed);
 
-            for (int t = 0; t < 2; t++)
+            for (int t = 0; t < tnum; t++)
             {
                 int tile = tileBase + t;
                 int startY = tile * TILE_H;
@@ -1140,13 +1146,13 @@ void workerThread(int id)
                 if (startY >= height)
                     goto worker_done;
                 
-                int endY = std::min(startY + TILE_H, height);
+                int endY = std::min(startY + (tnum +TILE_H), height);
                 renderTile(startY, endY, currentFrame);
     
             }
         }
         worker_done:
-        tilesDone.fetch_add(2, std::memory_order_relaxed);
+        tilesDone.fetch_add(tnum, std::memory_order_relaxed);
     }
 }
 
@@ -1301,6 +1307,7 @@ void renderCPUFrame()
     tilesDone = 0;
     currentFrame = frame;
     nextTile = 0;
+    constexpr int tnum = 4;
 
     {
         std::lock_guard<std::mutex> lock(workMutex);
@@ -1312,12 +1319,12 @@ void renderCPUFrame()
     // Main thread used as a worker
     while (true)
     {
-        int tileBase = nextTile.fetch_add(2, std::memory_order_relaxed);
+        int tileBase = nextTile.fetch_add(tnum, std::memory_order_relaxed);
         int startY = tileBase * TILE_H;
 
         if (startY >= height) break;
 
-        int endY = std::min(startY + (2 * TILE_H), height);
+        int endY = std::min(startY + (tnum * TILE_H), height);
         renderTile(startY, endY, currentFrame);
     }
 
