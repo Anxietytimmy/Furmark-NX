@@ -36,7 +36,7 @@ inline float32x4_t dot(const vec3x4& a, const vec3x4& b){
 
 // Neon normalize
 inline vec3x4 normalize(vec3x4 v){
-    float32x4_t len2 = vmlaq_f32(vmlaq_f32(vmulq_f32(v.x, v.x), v.y, v.y), v.z, v.z);
+    float32x4_t len2 = vfmaq_f32(vfmaq_f32(vmulq_f32(v.x, v.x), v.y, v.y), v.z, v.z);
 
     float32x4_t invLen = vrsqrteq_f32(len2);
 
@@ -273,12 +273,9 @@ static inline float32x4_t fastRsqrt(float32x4_t x)
 static inline vec3x4 normalizeFast(const vec3x4& v)
 {
     float32x4_t len2 =
-        vmlaq_f32(
-            vmulq_f32(v.z, v.z),
-            v.y,
-            v.y);
+        vfmaq_f32( vmulq_f32(v.z, v.z), v.y, v.y);
 
-    len2 = vmlaq_f32(len2, v.x, v.x);
+    len2 = vfmaq_f32(len2, v.x, v.x);
 
     float32x4_t invLen = fastRsqrt(len2);
 
@@ -288,3 +285,10 @@ static inline vec3x4 normalizeFast(const vec3x4& v)
     out.z = vmulq_f32(v.z, invLen);
     return out;
 }
+
+struct vec3x8 {
+    float32x4_t x0, x1;
+    float32x4_t y0, y1;
+    float32x4_t z0, z1;
+};
+
