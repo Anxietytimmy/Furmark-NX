@@ -686,6 +686,7 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
         oc.y = vsubq_f32(ro.y, cy);
         oc.z = vsubq_f32(ro.z, cz);
 
+
         float32x4_t b = dot(oc, rd);
         float32x4_t c = vsubq_f32(dot(oc, oc), vdupq_n_f32(1.0f));
         float32x4_t h = vsubq_f32(vmulq_f32(b, b), c);

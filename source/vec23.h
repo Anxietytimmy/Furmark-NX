@@ -56,14 +56,12 @@ inline vec3x4 normalize(vec3x4 v){
 
 // NEON reflections
 // holy fuck the hills are silent
-inline vec3x4 reflect(vec3x4 v, vec3x4 n){
-    float32x4_t d = dot(v, n);
-    float32x4_t two = vdupq_n_f32(2.0f);
-
+inline vec3x4 reflect(const vec3x4& v, const vec3x4& n){
+    float32x4_t two_d = vmulq_n_f32(dot(v, n), 2.0f);
     vec3x4 r;
-    r.x = vmlsq_f32(v.x, n.x, vmulq_f32(two, d));
-    r.y = vmlsq_f32(v.y, n.y, vmulq_f32(two, d));
-    r.z = vmlsq_f32(v.z, n.z, vmulq_f32(two, d));
+    r.x = vfmsq_f32(v.x, n.x, two_d);  // vfmsq instead of vmlsq
+    r.y = vfmsq_f32(v.y, n.y, two_d);
+    r.z = vfmsq_f32(v.z, n.z, two_d);
     return r;
 }
 
@@ -292,3 +290,31 @@ struct vec3x8 {
     float32x4_t z0, z1;
 };
 
+
+inline void dot8(const vec3x8& a, const vec3x8& b,
+                 float32x4_t& out0, float32x4_t& out1){
+    out0 = vmulq_f32(a.x0, b.x0);
+    out1 = vmulq_f32(a.x1, b.x1);
+    out0 = vfmaq_f32(out0, a.y0, b.y0);
+    out1 = vfmaq_f32(out1, a.y1, b.y1);
+    out0 = vfmaq_f32(out0, a.z0, b.z0);
+    out1 = vfmaq_f32(out1, a.z1, b.z1);
+}
+
+inline vec3x4 pack4_fast(const vec3f* __restrict__ v)
+{
+    // Treats 4 vec3f structs as 3 f32x4
+    float32x4x4_t raw = vld4q_f32(reinterpret_cast < const float *>(v));
+    // pad raw.val[#] = xyz
+    return { raw.val[0], raw.val[1], raw.val[2] };
+}
+
+inline vec3x4 clamp4(const vec3x4& v, float minv, float maxv){
+    float32x4_t lo = vdupq_n_f32(minv);
+    float32x4_t hi = vdupq_n_f32(maxv);
+    return {
+        vminnmq_f32(vmaxnmq_f32(v.x, lo), hi),
+        vminnmq_f32(vmaxnmq_f32(v.y, lo), hi),
+        vminnmq_f32(vmaxnmq_f32(v.z, lo), hi)
+    };
+}
