@@ -723,7 +723,7 @@ void GPUPTSceneInit()
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, 1280, 720, 0, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1280, 720, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
