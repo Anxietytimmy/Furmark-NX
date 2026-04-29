@@ -800,7 +800,7 @@ inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
 
     const float32x4_t BIAS = vdupq_n_f32(0.001f);
 
-    for(int bounce = 0; bounce <3; bounce++)
+    for(int bounce = 0; bounce <6; bounce++)
     {
         // If all lines are dead, stop
         if(vaddvq_u32(alive) == 0) break;
