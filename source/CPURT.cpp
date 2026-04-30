@@ -619,7 +619,7 @@ vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
     vec3f throughput(1.0f);
 
     // Controls the amount of bounces that the rays are allowed to produce
-    for(int bounce=0; bounce<6; bounce++)
+    for(int bounce=0; bounce<3; bounce++)
     {
         Hit h = intersectScene(ro,rd);
 
@@ -964,7 +964,7 @@ inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f out0[4]
 
     const float32x4_t BIAS = vdupq_n_f32(0.001f);
 
-    for (int bounce = 0; bounce < 6; bounce++)
+    for (int bounce = 0; bounce < 3; bounce++)
     {
         if (vaddvq_u32(vorrq_u32(alive0, alive1)) == 0) break;
 
