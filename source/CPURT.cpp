@@ -19,7 +19,6 @@
 #include <EGL/eglext.h> // EGL extensions
 #include <glad/glad.h>  // glad library (OpenGL loader)
 
-#include "stb_image.h"
 #include "sates.h"
 #include "vec23.h"
 
@@ -443,7 +442,6 @@ alignas(64) static int currentFrame = 0;
 
 alignas(64) std::atomic<bool> cpuRenderRunning(false);
 
-
 enum Material{
     WHITE,
     RED,
@@ -451,18 +449,6 @@ enum Material{
     LIGHT,
     MIRROR
 };
-
-
-// Random
-inline float randFloat(uint32_t& state)
-{
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-
-    return (state & 0xFFFFFF) / float(0xFFFFFF);
-}
-
 
 // Save accumulation as vectors, fallback
 // static std::vector<vec3f> cpuAccum;
@@ -475,60 +461,6 @@ struct alignas(16) PixelData { float r, g, b, a; };
 alignas(64) static PixelData * frameBuffers[2] = {nullptr, nullptr};
 alignas(64) static int currentRenderBuf = 0;
 alignas(64) static float currentScale = 1.0f;
-
-
-struct Hit {
-    float t;
-    Material mat;
-    vec3f normal;
-};
-
-struct Sphere{
-    vec3f center;
-    float radius;
-    int material;
-};
-
-// Sphere SDF
-bool intersectSphere(vec3f ro, vec3f rd, vec3f center, float r, float& t)
-{
-    vec3f oc = ro - center;
-
-    float b = dot(oc, rd);
-    float c = dot(oc, oc) - r*r;
-    float h = b*b - c;
-
-    if(h < 0.0f) return false;
-
-    h = sqrtf(h);
-    t = -b - h;
-
-    if(t < 0) t = -b + h;
-
-    return t > 0;
-}
-
-
-struct RayPacket4 {
-    vec3f ro[4];
-    vec3f rd[4];
-};
-
-struct ColorPacket4 {
-    vec3f c[4];
-};
-
-
-// Material colors
-vec3f getColor(Material m){
-    if(m == RED) return vec3f(1, 0.2, 0.2);
-    if(m == GREEN) return vec3f(0.2, 1.0, 0.2);
-    return vec3f(0.9);
-}
-
-bool isLight(int m){ return m == LIGHT; }
-bool isMirror(int m){ return m == MIRROR;}
-
 
 // Neon scene intersection
 inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, uint32x4_t& mat, vec3x4& normal)
@@ -652,160 +584,6 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
 
 
 // N E O N T I E M
-/*
-inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
-{
-    // Accumnulation registers
-    vec3x4 color;
-    color.x = color.y = color.z = vdupq_n_f32(0.0f);
-
-    vec3x4 throughput;
-    throughput.x = throughput.y = throughput.z = vdupq_n_f32(1.0f);
-
-    // Define alive, lines that still need bounces
-    uint32x4_t alive = vdupq_n_u32(0xFFFFFFFF);
-
-    const float32x4_t BIAS = vdupq_n_f32(0.001f);
-
-    for(int bounce = 0; bounce <6; bounce++)
-    {
-        // If all lines are dead, stop
-        if(vaddvq_u32(alive) == 0) break;
-
-        float32x4_t t;
-        uint32x4_t mat;
-        vec3x4 normal;
-        intersectScene4(ro, rd, t, mat, normal);
-
-        // Scalent
-        volatile float heat = 0.0f;
-        heat += sqrtf((bounce + 1.1f) * 7.31f);
-
-        uint32x4_t hit = vcltq_f32(t, vdupq_n_f32(1e29f));
-        uint32x4_t miss = vandq_u32(alive, vmvnq_u32(hit));
-
-        //Add a sky color for any lanes we miss
-        color.x = vbslq_f32(miss, vaddq_f32(color.x, vmulq_f32(throughput.x, vdupq_n_f32(0.7f))), color.x);
-        color.y = vbslq_f32(miss, vaddq_f32(color.y, vmulq_f32(throughput.y, vdupq_n_f32(0.8f))), color.y);
-        color.z = vbslq_f32(miss, vaddq_f32(color.z, vmulq_f32(throughput.z, vdupq_n_f32(1.0f))), color.z);
-        // Kill missed lanes
-        alive = vandq_u32(alive, hit);
-
-        // Hit position
-        vec3x4 pos;
-        pos.x = vmlaq_f32(ro.x, rd.x, t);
-        pos.y = vmlaq_f32(ro.y, rd.y, t);
-        pos.z = vmlaq_f32(ro.z, rd.z, t);
-
-        // Material masks
-        uint32x4_t isLight = vandq_u32(alive, vceqq_u32(mat, vdupq_n_u32(LIGHT)));
-        uint32x4_t isMirror = vandq_u32(alive, vceqq_u32(mat, vdupq_n_u32(MIRROR)));
-        uint32x4_t isDiff = vandq_u32(alive, vmvnq_u32(vorrq_u32(vceqq_u32(mat, vdupq_n_u32(LIGHT)), vceqq_u32(mat, vdupq_n_u32(MIRROR)))));
-
-        // Light
-        color.x = vbslq_f32(isLight, vaddq_f32(color.x, vmulq_f32(throughput.x, vdupq_n_f32(6.0f))), color.x);
-        color.y = vbslq_f32(isLight, vaddq_f32(color.y, vmulq_f32(throughput.y, vdupq_n_f32(6.0f))), color.y);
-        color.z = vbslq_f32(isLight, vaddq_f32(color.z, vmulq_f32(throughput.z, vdupq_n_f32(6.0f))), color.z);
-        // Kill light lanes
-        alive = vandq_u32(alive, vmvnq_u32(isLight));
-
-        // Mirror reflection, no throughput changes
-        vec3x4 refl = reflect(rd, normal);
-        rd.x = vbslq_f32(isMirror, refl.x, rd.x);
-        rd.y = vbslq_f32(isMirror, refl.y, rd.y);
-        rd.z = vbslq_f32(isMirror, refl.z, rd.z);
-
-        // Build albedo from material per lane for diffuse
-        // White = 0.9, red = 1,0.2,0.2, geen = 0.2,1,0.2
-        uint32x4_t isWhite = vceqq_u32(mat, vdupq_n_u32(WHITE));
-        uint32x4_t isRed = vceqq_u32(mat, vdupq_n_u32(RED));
-        uint32x4_t isGreen = vceqq_u32(mat, vdupq_n_u32(GREEN));
-
-        float32x4_t albR = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vbslq_f32(isRed, vdupq_n_f32(1.0f), vdupq_n_f32(0.2f)));
-        float32x4_t albG = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vbslq_f32(isRed, vdupq_n_f32(0.2f), vdupq_n_f32(1.0f)));
-        float32x4_t albB = vbslq_f32(isWhite, vdupq_n_f32(0.9f), vdupq_n_f32(0.2f));
-
-        throughput.x = vbslq_f32(isDiff, vmulq_f32(throughput.x, albR), throughput.x);
-        throughput.y = vbslq_f32(isDiff, vmulq_f32(throughput.y, albG), throughput.y);
-        throughput.z = vbslq_f32(isDiff, vmulq_f32(throughput.z, albB), throughput.z);
-
-        // Diffuse bounce direction
-        // We use scalars per lane as RNG isn't easily vectorized
-        // Extract normals to scalar for building
-        float nx[4], ny[4], nz[4];
-        vst1q_f32(nx, normal.x);
-        vst1q_f32(ny, normal.y);
-        vst1q_f32(nz, normal.z);
-
-        uint32_t diffMask[4];
-        vst1q_u32(diffMask, isDiff);
-
-        // Only gen scalar randoms
-        float rx[4], ry[4], rz[4];
-        
-        for (int i = 0; i < 4; i++)
-        {
-            if(diffMask[i])
-            {
-                float x, y, z, l2;
-
-            do  {
-                    x = randFloat(rng[i]) * 2.0f - 1.0f;
-                    y = randFloat(rng[i]) * 2.0f - 1.0f;
-                    z = randFloat(rng[i]) * 2.0f - 1.0f;
-                    l2 = x*x + y*y + z*z;
-                }
-
-            while(l2 > 1.0f || l2 < 1e-6f);
-
-            if(x*nx[i] + y*ny[i] + z*nz[i] < 0.0f)
-            {
-                x = -x; y = -y; z = -z;
-            }
-
-            rx[i] = x;
-            ry[i] = y;
-            rz[i] = z;
-            }
-            else
-            {
-                rx[i] = ry[i] = rz[i] = 0.0f;
-            }
-        }
-
-        // load packet random vectors
-        float32x4_t vrx = vld1q_f32(rx);
-        float32x4_t vry = vld1q_f32(ry);
-        float32x4_t vrz = vld1q_f32(rz);
-
-        vec3x4 bounceX;
-        // diffuse dir = normalize(n + r)
-        bounceX.x = vaddq_f32(normal.x, vrx);
-        bounceX.y = vaddq_f32(normal.y, vry);
-        bounceX.z = vaddq_f32(normal.z, vrz);
-
-        bounceX = normalizeFast(bounceX);
-
-        // masked writeback
-        rd.x = vbslq_f32(isDiff, bounceX.x, rd.x);
-        rd.y = vbslq_f32(isDiff, bounceX.y, rd.y);
-        rd.z = vbslq_f32(isDiff, bounceX.z, rd.z);
-
-        // Advance rays off the surface
-        ro.x = vmlaq_f32(pos.x, normal.x, BIAS);
-        ro.y = vmlaq_f32(pos.y, normal.y, BIAS);
-        ro.z = vmlaq_f32(pos.z, normal.z, BIAS);
-    }
-
-    // Unpack results
-    float cr[4], cg[4], cb[4];
-    vst1q_f32(cr, color.x);
-    vst1q_f32(cg, color.y);
-    vst1q_f32(cb, color.z);
-    for(int i = 0; i < 4; i++)
-        outColor[i] = { cr[i], cg[i], cb[i] };
-}
-*/
 
 // NEON, but twice now.
 // Now why in fucks name are we doing this.
@@ -959,54 +737,10 @@ inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f out0[4]
     }
 }
 
-
 static vec3f camForward;
 static vec3f camRight;
 static vec3f camUp;
 static vec3f camPos;
-
-// Scalar ray compute
-inline vec3f computeRay(float x, float y)
-{
-    float uvx = (x + 0.5f) / float(width);
-    float uvy = (y + 0.5f) / float(height);
-
-    float px = uvx * 2.0f - 1.0f;
-    float py = uvy * 2.0f - 1.0f;
-
-    float aspect = float(width) / float(height);
-    px *= aspect;  
-
-    return normalize(
-        camForward +
-        camRight * px +
-        camUp    * py
-    );
-}
-
-//S E E B
-inline uint32_t seed(int idx, int frame)
-{
-    return (uint32_t)(idx * 1973u ^ frame * 9277u ^ 0x9e3779b9u) | 1u;
-}
-
-// V S E E B
-uint32x4_t seed_neon(uint32_t x, uint32_t y, uint32_t frame)
-{
-    // Create base seeb
-    uint32_t base = (x * 1973 + y * 9277 + frame * 26699) | 1;
-
-    // load onto 4 lanes
-    uint32x4_t vBase = vdupq_n_u32(base);
-
-    // Add offsets between lanes
-    static const uint32_t offsets[4] = {0, 1, 2, 3};
-    uint32x4_t vOffsets = vld1q_u32(offsets);
-
-    return vaddq_u32(vBase, vOffsets);
-}
-
-
 
 //Pin threads to cores so the OS doesn't throw them around everywhere
 void pinThread(int core)
@@ -1105,20 +839,6 @@ void renderTile(int startY, int endY, int frameIndex)
         trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
 
         // Accumulate into FB
-        /*
-        float scale = 1.0f / float(currentFrame + 1);
-        for (int k = 0; k < 4; k++) {
-            frameBuffer[base0+k].r += (col0[k].x - frameBuffer[base0+k].r) * scale;
-            frameBuffer[base0+k].g += (col0[k].y - frameBuffer[base0+k].g) * scale;
-            frameBuffer[base0+k].b += (col0[k].z - frameBuffer[base0+k].b) * scale;
-            frameBuffer[base0+k].a  = 1.0f;
-
-            frameBuffer[base1+k].r += (col1[k].x - frameBuffer[base1+k].r) * scale;
-            frameBuffer[base1+k].g += (col1[k].y - frameBuffer[base1+k].g) * scale;
-            frameBuffer[base1+k].b += (col1[k].z - frameBuffer[base1+k].b) * scale;
-            frameBuffer[base1+k].a  = 1.0f;
-        }
-        */
         // coca cloa espuma 
         // Enough crack hits
         // Loads 4 pixels assuming that RGBA is used which, see below
@@ -1429,6 +1149,8 @@ void CPURTRender()
     workCV.notify_all();
 
     // Yeah I am not leaving this with ye ol 20% cpu usage
+    // HOWEVER, tnum has to be differnet since this thread will stall the shit out of every other thread if it does not have easier loads.
+    // in other words, skill issue
         while (true)
     {
         int tnum = 6;

@@ -19,13 +19,6 @@ struct vec3x4 {
     float32x4_t x, y, z;
 };
 
-struct Hit4 {
-    float32x4_t t;
-    vec3x4 normal;
-    uint32x4_t material;
-};
-
-
 // NEON Dot product
 inline float32x4_t dot(const vec3x4& a, const vec3x4& b){
     float32x4_t acc = vmulq_f32(a.x, b.x);
@@ -56,6 +49,9 @@ inline vec3x4 normalize(vec3x4 v){
 
 // NEON reflections
 // holy fuck the hills are silent
+// Reflections
+// In my restless dreams, I see that town
+// The mental hospital
 inline vec3x4 reflect(const vec3x4& v, const vec3x4& n){
     float32x4_t two_d = vmulq_n_f32(dot(v, n), 2.0f);
     vec3x4 r;
@@ -148,22 +144,6 @@ inline vec3f normalize(const vec3f& v) {
     return v * invLen;
 }
 
-// Reflections
-// In my restless dreams, I see that town
-// The mental hospital
-inline vec3f reflect(const vec3f& v, const vec3f& n) {
-    return v - n * (2.0f * dot(v, n));
-}
-
-// clamp
-inline vec3f clamp(const vec3f& v, float minv, float maxv) {
-    return vec3f(
-        fminf(fmaxf(v.x, minv), maxv),
-        fminf(fmaxf(v.y, minv), maxv),
-        fminf(fmaxf(v.z, minv), maxv)
-    );
-}
-
 // Cross (cam)
 inline vec3f cross(const vec3f& a, const vec3f& b) {
     return vec3f(
@@ -204,49 +184,6 @@ inline uint32x4_t selecti(uint32x4_t m, uint32x4_t a, uint32x4_t b) {
 
 inline uint32x4_t andMask(uint32x4_t a, uint32x4_t b) {
     return vandq_u32(a, b);
-}
-
-// Pack/unpacking functions
-inline vec3x4 pack4(const vec3f* v)
-{
-    vec3x4 out;
-
-    out.x = vdupq_n_f32(0.0f);
-    out.y = vdupq_n_f32(0.0f);
-    out.z = vdupq_n_f32(0.0f);
-
-    out.x = vsetq_lane_f32(v[0].x, out.x, 0);
-    out.x = vsetq_lane_f32(v[1].x, out.x, 1);
-    out.x = vsetq_lane_f32(v[2].x, out.x, 2);
-    out.x = vsetq_lane_f32(v[3].x, out.x, 3);
-
-    out.y = vsetq_lane_f32(v[0].y, out.y, 0);
-    out.y = vsetq_lane_f32(v[1].y, out.y, 1);
-    out.y = vsetq_lane_f32(v[2].y, out.y, 2);
-    out.y = vsetq_lane_f32(v[3].y, out.y, 3);
-
-    out.z = vsetq_lane_f32(v[0].z, out.z, 0);
-    out.z = vsetq_lane_f32(v[1].z, out.z, 1);
-    out.z = vsetq_lane_f32(v[2].z, out.z, 2);
-    out.z = vsetq_lane_f32(v[3].z, out.z, 3);
-
-    return out;
-}
-
-inline void unpack4(const vec3x4& v, vec3f* out)
-{
-    float xx[4], yy[4], zz[4];
-
-    vst1q_f32(xx, v.x);
-    vst1q_f32(yy, v.y);
-    vst1q_f32(zz, v.z);
-
-    for(int i = 0; i < 4; i++)
-    {
-        out[i].x = xx[i];
-        out[i].y = yy[i];
-        out[i].z = zz[i];
-    }
 }
 
 // fast reciprocals
@@ -301,24 +238,6 @@ inline void dot8(const vec3x8& a, const vec3x8& b,
     out1 = vfmaq_f32(out1, a.z1, b.z1);
 }
 
-inline vec3x4 pack4_fast(const vec3f*v)
-{
-    // Treats 4 vec3f structs as 3 f32x4
-    // float32x4x4_t raw = vld4q_f32(reinterpret_cast < const float *>(v));
-    // pad raw.val[#] = xyz
-    // return { raw.val[0], raw.val[1], raw.val[2] };
-    return pack4(v);
-}
-
-inline vec3x4 clamp4(const vec3x4& v, float minv, float maxv){
-    float32x4_t lo = vdupq_n_f32(minv);
-    float32x4_t hi = vdupq_n_f32(maxv);
-    return {
-        vminnmq_f32(vmaxnmq_f32(v.x, lo), hi),
-        vminnmq_f32(vmaxnmq_f32(v.y, lo), hi),
-        vminnmq_f32(vmaxnmq_f32(v.z, lo), hi)
-    };
-}
 
 // NEW ARRIVALS IN INDIA 
 // Maybe its those horse people I was talking about 
