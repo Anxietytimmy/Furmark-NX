@@ -1124,6 +1124,24 @@ inline uint32_t seed(int idx, int frame)
     return (uint32_t)(idx * 1973u ^ frame * 9277u ^ 0x9e3779b9u) | 1u;
 }
 
+// V S E E B
+uint32x4_t seed_neon(uint32_t x, uint32_t y, uint32_t frame)
+{
+    // Create base seeb
+    uint32_t base = (x * 1973 + y * 9277 + frame * 26699) | 1;
+
+    // load onto 4 lanes
+    uint32x4_t vBase = vdupq_n_u32(base);
+
+    // Add offsets between lanes
+    static const uint32_t offsets[4] = {0, 1, 2, 3};
+    uint32x4_t vOffsets = vld1q_u32(offsets);
+
+    return vaddq_u32(vBase, vOffsets);
+}
+
+
+
 //Pin threads to cores so the OS doesn't throw them around everywhere
 void pinThread(int core)
 {
@@ -1165,6 +1183,10 @@ void renderTile(int startY, int endY, int frameIndex)
     const float32x4_t half = vdupq_n_f32(0.5f);
     const float32x4_t two  = vdupq_n_f32(2.0f);
     const float32x4_t one  = vdupq_n_f32(1.0f);
+
+    // Constraints for LCG RNG
+    const uint32x4_t vA = vdupq_n_u32(1664525);
+    const uint32x4_t vC = vdupq_n_u32(1013904223);
 
     for(int y = startY; y < endY; y++){
 
@@ -1212,17 +1234,21 @@ void renderTile(int startY, int endY, int frameIndex)
         rd1 = normalizeFast(rd1);
 
         // Seed RNG, do this twice so each lane gets its own  seed
-        uint32_t seeds0[4] = {
-            seed(base0+0, currentFrame), seed(base0+1, currentFrame),
-            seed(base0+2, currentFrame), seed(base0+3, currentFrame)
-        };
-        uint32x4_t rng0 = vld1q_u32(seeds0);
+        // Setup base seeds
+        uint32_t baseIdx = (y * 9277 + currentFrame * 26699) | 1;
+        uint32x4_t vBase = vdupq_n_u32(baseIdx);
 
-        uint32_t seeds1[4] = {
-            seed(base1+0, currentFrame), seed(base1+1, currentFrame),
-            seed(base1+2, currentFrame), seed(base1+3, currentFrame)
-        };
-        uint32x4_t rng1 = vld1q_u32(seeds1);
+        // Gen offsets
+        static const uint32_t xOff0[4] = { (uint32_t)x*1973, (uint32_t)(x+1)*1973, (uint32_t)(x+2)*1973, (uint32_t)(x+3)*1973 };
+        static const uint32_t xOff1[4] = { (uint32_t)(x+4)*1973, (uint32_t)(x+5)*1973, (uint32_t)(x+6)*1973, (uint32_t)(x+7)*1973 };
+
+        // Finalize seeds
+        uint32x4_t rng0 = vaddq_u32(vBase, vld1q_u32(xOff0));
+        uint32x4_t rng1 = vaddq_u32(vBase, vld1q_u32(xOff1));
+
+        // entropy go brr
+        rng0 = vmlaq_u32(vC, rng0, vA);
+        rng1 = vmlaq_u32(vC, rng1, vA);
 
         vec3f col0[4], col1[4];
         trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
