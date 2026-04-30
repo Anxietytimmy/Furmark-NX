@@ -1188,6 +1188,11 @@ void renderTile(int startY, int endY, int frameIndex)
     const uint32x4_t vA = vdupq_n_u32(1664525);
     const uint32x4_t vC = vdupq_n_u32(1013904223);
 
+    // Vars for FB
+    float scaleVal = 1.0f / float(currentFrame + 1);
+    float32x4_t vScale = vdupq_n_f32(scaleVal);
+    float32x4_t vOne = vdupq_n_f32(1.0f);
+
     for(int y = startY; y < endY; y++){
 
     float32x4_t py = vdupq_n_f32(float(y));
@@ -1254,6 +1259,7 @@ void renderTile(int startY, int endY, int frameIndex)
         trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
 
         // Accumulate into FB
+        /*
         float scale = 1.0f / float(currentFrame + 1);
         for (int k = 0; k < 4; k++) {
             frameBuffer[base0+k].r += (col0[k].x - frameBuffer[base0+k].r) * scale;
@@ -1266,6 +1272,42 @@ void renderTile(int startY, int endY, int frameIndex)
             frameBuffer[base1+k].b += (col1[k].z - frameBuffer[base1+k].b) * scale;
             frameBuffer[base1+k].a  = 1.0f;
         }
+        */
+        // coca cloa espuma 
+        // Enough crack hits
+        // Loads 4 pixels assuming that RGBA is used which, see below
+        float* fbPtr0 = (float*)&frameBuffer[base0];
+        float* fbPtr1 = (float*)&frameBuffer[base1];
+
+        // load said 4 pixels into registers
+        float32x4x4_t vFB0 = vld4q_f32(fbPtr0);
+        float32x4x4_t vFB1 = vld4q_f32(fbPtr1);
+
+        // convert col into new registers
+        // TBH it would be alot better to have trace8 return these as vectors, but I am lazy
+        float32x4_t vNewR0 = {col0[0].x, col0[1].x, col0[2].x, col0[3].x};
+        float32x4_t vNewG0 = {col0[0].y, col0[1].y, col0[2].y, col0[3].y};
+        float32x4_t vNewB0 = {col0[0].z, col0[1].z, col0[2].z, col0[3].z};
+        float32x4_t vNewR1 = {col1[0].x, col1[1].x, col1[2].x, col1[3].x};
+        float32x4_t vNewG1 = {col1[0].y, col1[1].y, col1[2].y, col1[3].y};
+        float32x4_t vNewB1 = {col1[0].z, col1[1].z, col1[2].z, col1[3].z};
+
+        // actually accumulate this time
+        vFB0.val[0] = vfmaq_f32(vFB0.val[0], vsubq_f32(vNewR0, vFB0.val[0]), vScale);
+        vFB0.val[1] = vfmaq_f32(vFB0.val[1], vsubq_f32(vNewG0, vFB0.val[1]), vScale);
+        vFB0.val[2] = vfmaq_f32(vFB0.val[2], vsubq_f32(vNewB0, vFB0.val[2]), vScale);
+        vFB0.val[3] = vOne;
+
+        // HA HA 
+        // O N E
+        vFB1.val[0] = vfmaq_f32(vFB1.val[0], vsubq_f32(vNewR1, vFB1.val[0]), vScale);
+        vFB1.val[1] = vfmaq_f32(vFB1.val[1], vsubq_f32(vNewG1, vFB1.val[1]), vScale);
+        vFB1.val[2] = vfmaq_f32(vFB1.val[2], vsubq_f32(vNewB1, vFB1.val[2]), vScale);
+        vFB1.val[3] = vOne;
+
+        // Blast back into memory
+        vst4q_f32(fbPtr0, vFB0);
+        vst4q_f32(fbPtr1, vFB1);
     }
 }
 }
