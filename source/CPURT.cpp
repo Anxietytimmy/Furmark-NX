@@ -786,6 +786,7 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
 
 
 // N E O N T I E M
+/*
 inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
 {
     // Accumnulation registers
@@ -938,6 +939,160 @@ inline void trace4(vec3x4 ro, vec3x4 rd, vec3f outColor[4], uint32_t rng[4])
     for(int i = 0; i < 4; i++)
         outColor[i] = { cr[i], cg[i], cb[i] };
 }
+*/
+
+// NEON, but twice now.
+// Now why in fucks name are we doing this.
+// Well, trace4 has a few problems.
+// Biggest of which is that trace4 leaves one pipeline entirely unused, and it still has scalar fallbacks
+// So, trace8 time, because that should make, a sense
+// We process 2 packets of 4 rays together, with post intersection ops interleaved.
+// This means that A57 can see the dependency chains and dual issue is triggered.
+
+inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f out0[4], vec3f out1[4], uint32x4_t rng0, uint32x4_t rng1)
+{
+    vec3x4 color0, color1;
+    color0.x = color0.y = color0.z = vdupq_n_f32(0.0f);
+    color1.x = color1.y = color1.z = vdupq_n_f32(0.0f);
+
+    vec3x4 tput0, tput1;
+    tput0.x = tput0.y = tput0.z = vdupq_n_f32(1.0f);
+    tput1.x = tput1.y = tput1.z = vdupq_n_f32(1.0f);
+
+    uint32x4_t alive0 = vdupq_n_u32(0xFFFFFFFF);
+    uint32x4_t alive1 = vdupq_n_u32(0xFFFFFFFF);
+
+    const float32x4_t BIAS = vdupq_n_f32(0.001f);
+
+    for (int bounce = 0; bounce < 6; bounce++)
+    {
+        if (vaddvq_u32(vorrq_u32(alive0, alive1)) == 0) break;
+
+        float32x4_t t0, t1;
+        uint32x4_t mat0, mat1;
+        vec3x4 n0, n1;
+
+        // call scene intersect twice
+        // since these two share no dependencies we can take advantage of dual issue
+        intersectScene4(ro0, rd0, t0, mat0, n0);
+        intersectScene4(ro1, rd1, t1, mat1, n1);
+
+        // Hit/miss
+        uint32x4_t hit0 = vcltq_f32(t0, vdupq_n_f32(1e29f));
+        uint32x4_t hit1  = vcltq_f32(t1, vdupq_n_f32(1e29f));
+        uint32x4_t miss0 = vandq_u32(alive0, vmvnq_u32(hit0));
+        uint32x4_t miss1 = vandq_u32(alive1, vmvnq_u32(hit1));
+
+        // Sky color
+        color0.x = vbslq_f32(miss0, vaddq_f32(color0.x, vmulq_f32(tput0.x, vdupq_n_f32(0.7f))), color0.x);
+        color1.x = vbslq_f32(miss1, vaddq_f32(color1.x, vmulq_f32(tput1.x, vdupq_n_f32(0.7f))), color1.x);
+        color0.y = vbslq_f32(miss0, vaddq_f32(color0.y, vmulq_f32(tput0.y, vdupq_n_f32(0.8f))), color0.y);
+        color1.y = vbslq_f32(miss1, vaddq_f32(color1.y, vmulq_f32(tput1.y, vdupq_n_f32(0.8f))), color1.y);
+        color0.z = vbslq_f32(miss0, vaddq_f32(color0.z, vmulq_f32(tput0.z, vdupq_n_f32(1.0f))), color0.z);
+        color1.z = vbslq_f32(miss1, vaddq_f32(color1.z, vmulq_f32(tput1.z, vdupq_n_f32(1.0f))), color1.z);
+
+        alive0 = vandq_u32(alive0, hit0);
+        alive1 = vandq_u32(alive1, hit1);
+
+        // Hit positions
+        vec3x4 pos0, pos1;
+        pos0.x = vmlaq_f32(ro0.x, rd0.x, t0);   
+        pos0.y = vmlaq_f32(ro0.y, rd0.y, t0);
+        pos0.z = vmlaq_f32(ro0.z, rd0.z, t0);
+        pos1.x = vmlaq_f32(ro1.x, rd1.x, t1);
+        pos1.y = vmlaq_f32(ro1.y, rd1.y, t1);
+        pos1.z = vmlaq_f32(ro1.z, rd1.z, t1);
+
+        // Materials
+        uint32x4_t isLight0  = vandq_u32(alive0, vceqq_u32(mat0, vdupq_n_u32(LIGHT)));
+        uint32x4_t isLight1  = vandq_u32(alive1, vceqq_u32(mat1, vdupq_n_u32(LIGHT)));
+        uint32x4_t isMirror0 = vandq_u32(alive0, vceqq_u32(mat0, vdupq_n_u32(MIRROR)));
+        uint32x4_t isMirror1 = vandq_u32(alive1, vceqq_u32(mat1, vdupq_n_u32(MIRROR)));
+
+
+        uint32x4_t notLM0 = vmvnq_u32(vorrq_u32(vceqq_u32(mat0, vdupq_n_u32(LIGHT)), vceqq_u32(mat0, vdupq_n_u32(MIRROR))));
+        uint32x4_t notLM1 = vmvnq_u32(vorrq_u32(vceqq_u32(mat1, vdupq_n_u32(LIGHT)), vceqq_u32(mat1, vdupq_n_u32(MIRROR))));
+        uint32x4_t isDiff0 = vandq_u32(alive0, notLM0);
+        uint32x4_t isDiff1 = vandq_u32(alive1, notLM1);
+
+        // Light emission
+        color0.x = vbslq_f32(isLight0, vaddq_f32(color0.x, vmulq_f32(tput0.x, vdupq_n_f32(6.0f))), color0.x);
+        color1.x = vbslq_f32(isLight1, vaddq_f32(color1.x, vmulq_f32(tput1.x, vdupq_n_f32(6.0f))), color1.x);
+        color0.y = vbslq_f32(isLight0, vaddq_f32(color0.y, vmulq_f32(tput0.y, vdupq_n_f32(6.0f))), color0.y);
+        color1.y = vbslq_f32(isLight1, vaddq_f32(color1.y, vmulq_f32(tput1.y, vdupq_n_f32(6.0f))), color1.y);
+        color0.z = vbslq_f32(isLight0, vaddq_f32(color0.z, vmulq_f32(tput0.z, vdupq_n_f32(6.0f))), color0.z);
+        color1.z = vbslq_f32(isLight1, vaddq_f32(color1.z, vmulq_f32(tput1.z, vdupq_n_f32(6.0f))), color1.z);
+
+        alive0 = vandq_u32(alive0, vmvnq_u32(isLight0));
+        alive1 = vandq_u32(alive1, vmvnq_u32(isLight1));
+
+        // Mirrors
+        vec3x4 refl0 = reflect(rd0, n0);
+        vec3x4 refl1 = reflect(rd1, n1);
+        rd0.x = vbslq_f32(isMirror0, refl0.x, rd0.x);   
+        rd1.x = vbslq_f32(isMirror1, refl1.x, rd1.x);
+        rd0.y = vbslq_f32(isMirror0, refl0.y, rd0.y);   
+        rd1.y = vbslq_f32(isMirror1, refl1.y, rd1.y);
+        rd0.z = vbslq_f32(isMirror0, refl0.z, rd0.z);   
+        rd1.z = vbslq_f32(isMirror1, refl1.z, rd1.z);
+
+        // Albedo
+        uint32x4_t isWhite0 = vceqq_u32(mat0, vdupq_n_u32(WHITE));
+        uint32x4_t isWhite1 = vceqq_u32(mat1, vdupq_n_u32(WHITE));
+        uint32x4_t isRed0   = vceqq_u32(mat0, vdupq_n_u32(RED));
+        uint32x4_t isRed1   = vceqq_u32(mat1, vdupq_n_u32(RED));
+
+        // White=0.9, Red=(1,0.2,0.2), Green=(0.2,1,0.2)
+        float32x4_t w = vdupq_n_f32(0.9f), hi = vdupq_n_f32(1.0f), lo = vdupq_n_f32(0.2f);
+        float32x4_t aR0 = vbslq_f32(isWhite0, w, vbslq_f32(isRed0, hi, lo));
+        float32x4_t aR1 = vbslq_f32(isWhite1, w, vbslq_f32(isRed1, hi, lo));
+        float32x4_t aG0 = vbslq_f32(isWhite0, w, vbslq_f32(isRed0, lo, hi));
+        float32x4_t aG1 = vbslq_f32(isWhite1, w, vbslq_f32(isRed1, lo, hi));
+        float32x4_t aB0 = vbslq_f32(isWhite0, w, lo);
+        float32x4_t aB1 = vbslq_f32(isWhite1, w, lo);
+
+        tput0.x = vbslq_f32(isDiff0, vmulq_f32(tput0.x, aR0), tput0.x);
+        tput1.x = vbslq_f32(isDiff1, vmulq_f32(tput1.x, aR1), tput1.x);
+        tput0.y = vbslq_f32(isDiff0, vmulq_f32(tput0.y, aG0), tput0.y);
+        tput1.y = vbslq_f32(isDiff1, vmulq_f32(tput1.y, aG1), tput1.y);
+        tput0.z = vbslq_f32(isDiff0, vmulq_f32(tput0.z, aB0), tput0.z);
+        tput1.z = vbslq_f32(isDiff1, vmulq_f32(tput1.z, aB1), tput1.z);
+
+        // Cos hemisphere bounce
+        // we can also use dual issue as the samplers start at the same time with no dependencies
+        vec3x4 bounce0 = cosineSampleHemisphere4(n0, rng0);
+        vec3x4 bounce1 = cosineSampleHemisphere4(n1, rng1);
+
+        rd0.x = vbslq_f32(isDiff0, bounce0.x, rd0.x);   rd1.x = vbslq_f32(isDiff1, bounce1.x, rd1.x);
+        rd0.y = vbslq_f32(isDiff0, bounce0.y, rd0.y);   rd1.y = vbslq_f32(isDiff1, bounce1.y, rd1.y);
+        rd0.z = vbslq_f32(isDiff0, bounce0.z, rd0.z);   rd1.z = vbslq_f32(isDiff1, bounce1.z, rd1.z);
+
+        // Advance rays off surfaces
+        ro0.x = vmlaq_f32(pos0.x, n0.x, BIAS);
+        ro1.x = vmlaq_f32(pos1.x, n1.x, BIAS);
+        ro0.y = vmlaq_f32(pos0.y, n0.y, BIAS);   
+        ro1.y = vmlaq_f32(pos1.y, n1.y, BIAS);
+        ro0.z = vmlaq_f32(pos0.z, n0.z, BIAS);   
+        ro1.z = vmlaq_f32(pos1.z, n1.z, BIAS);
+    }
+
+    // unpack results
+    float cr0[4], cg0[4], cb0[4];
+    float cr1[4], cg1[4], cb1[4];
+    vst1q_f32(cr0, color0.x);
+    vst1q_f32(cg0, color0.y);
+    vst1q_f32(cb0, color0.z);
+    vst1q_f32(cr1, color1.x);
+    vst1q_f32(cg1, color1.y);
+    vst1q_f32(cb1, color1.z);
+
+    for (int i = 0; i < 4; i++)
+    {
+        out0[i] = { cr0[i], cg0[i], cb0[i] };
+        out1[i] = { cr1[i], cg1[i], cb1[i] };
+    }
+}
+
 
 static vec3f camForward;
 static vec3f camRight;
@@ -973,11 +1128,7 @@ inline uint32_t seed(int idx, int frame)
 void pinThread(int core)
 {
     Handle thread = CUR_THREAD_HANDLE;
-
-    // Allow only this core
-    u64 mask = (1ULL << core);
-
-    svcSetThreadCoreMask(thread, mask, mask);
+    svcSetThreadCoreMask(thread, core, 1ULL << core);
 }
 
 // Denoising sampler
@@ -1022,84 +1173,72 @@ void renderTile(int startY, int endY, int frameIndex)
     float32x4_t uvy = vmulq_f32(py, invH);
     float32x4_t sy = vsubq_f32(vmulq_f32(uvy, two), one);
 
-    for(int x = 0; x < width; x += 4)
+    for(int x = 0; x <= width-8; x += 8)
     {
-        int base = y * width + x;
+        int base0 = y * width + x;
+        int base1 = base0 + 4;
 
-        // Prefetch for FB
-        // (FB, [Base, px write ahead], write intent, locality)
-        __builtin_prefetch(&frameBuffer [base + 16], 1, 3);
+        // Prefetch FB
+        int prefetchIdx = base0 + 32;
+        if (prefetchIdx < width * height)
+            __builtin_prefetch(&frameBuffer[prefetchIdx], 1, 3);
 
-        vec3f col[4];
-        uint32_t rng[4];
-            
-            // pixel coord
-            float32x4_t px = {
-                float(x + 0) + 0.5f,
-                float(x + 1) + 0.5f,
-                float(x + 2) + 0.5f,
-                float(x + 3) + 0.5f
-            };
+        // Build pixel coord
+        float32x4_t px0 = { float(x)+0.5f, float(x+1)+0.5f, float(x+2)+0.5f, float(x+3)+0.5f };
+        float32x4_t px1 = { float(x+4)+0.5f, float(x+5)+0.5f, float(x+6)+0.5f, float(x+7)+0.5f };
 
-            float32x4_t uvx = vmulq_f32(px, invW);
+        float32x4_t uvx0 = vmulq_f32(px0, invW);
+        float32x4_t uvx1 = vmulq_f32(px1, invW);
 
-            float32x4_t sx = vsubq_f32(vmulq_f32(uvx, two), one);
+        float32x4_t sx0 = vmulq_n_f32(vsubq_f32(vmulq_f32(uvx0, two), one), aspect);
+        float32x4_t sx1 = vmulq_n_f32(vsubq_f32(vmulq_f32(uvx1, two), one), aspect);
 
-            // correct aspect
-            sx = vmulq_n_f32(sx, aspect);
 
-            vec3x4 ro4, rd4;
+        // Build ray packets
+        vec3x4 ro0, rd0, ro1, rd1;
+        ro0.x = ro1.x = vdupq_n_f32(camPos.x);
+        ro0.y = ro1.y = vdupq_n_f32(camPos.y);
+        ro0.z = ro1.z = vdupq_n_f32(camPos.z);
 
-            // Replicate origin
-            ro4.x = vdupq_n_f32(camPos.x);
-            ro4.y = vdupq_n_f32(camPos.y);
-            ro4.z = vdupq_n_f32(camPos.z);
+        rd0.x = vaddq_f32(vdupq_n_f32(camForward.x), vaddq_f32(vmulq_n_f32(sx0, camRight.x), vmulq_n_f32(sy, camUp.x)));
+        rd0.y = vaddq_f32(vdupq_n_f32(camForward.y), vaddq_f32(vmulq_n_f32(sx0, camRight.y), vmulq_n_f32(sy, camUp.y)));
+        rd0.z = vaddq_f32(vdupq_n_f32(camForward.z), vaddq_f32(vmulq_n_f32(sx0, camRight.z), vmulq_n_f32(sy, camUp.z)));
 
-            // Direction -> forward + right * sx + up * sx
-            rd4.x = vaddq_f32(vdupq_n_f32(camForward.x), vaddq_f32(vmulq_n_f32(sx, camRight.x), vmulq_n_f32(sy, camUp.x)));
-            rd4.y = vaddq_f32(vdupq_n_f32(camForward.y), vaddq_f32(vmulq_n_f32(sx, camRight.y), vmulq_n_f32(sy, camUp.y)));
-            rd4.z = vaddq_f32(vdupq_n_f32(camForward.z), vaddq_f32(vmulq_n_f32(sx, camRight.z), vmulq_n_f32(sy, camUp.z)));
+        rd1.x = vaddq_f32(vdupq_n_f32(camForward.x), vaddq_f32(vmulq_n_f32(sx1, camRight.x), vmulq_n_f32(sy, camUp.x)));
+        rd1.y = vaddq_f32(vdupq_n_f32(camForward.y), vaddq_f32(vmulq_n_f32(sx1, camRight.y), vmulq_n_f32(sy, camUp.y)));
+        rd1.z = vaddq_f32(vdupq_n_f32(camForward.z), vaddq_f32(vmulq_n_f32(sx1, camRight.z), vmulq_n_f32(sy, camUp.z)));
 
-            // Normalize packets
-            rd4 = normalizeFast(rd4);
+        rd0 = normalizeFast(rd0);
+        rd1 = normalizeFast(rd1);
 
-            // Rng still needed
-            for(int k=0;k<4;k++)
-            {
-                int idx = base + k;
-                rng[k] = seed(idx, currentFrame);
-            }
+        // Seed RNG, do this twice so each lane gets its own  seed
+        uint32_t seeds0[4] = {
+            seed(base0+0, currentFrame), seed(base0+1, currentFrame),
+            seed(base0+2, currentFrame), seed(base0+3, currentFrame)
+        };
+        uint32x4_t rng0 = vld1q_u32(seeds0);
 
-        trace4(ro4, rd4, col, rng);
+        uint32_t seeds1[4] = {
+            seed(base1+0, currentFrame), seed(base1+1, currentFrame),
+            seed(base1+2, currentFrame), seed(base1+3, currentFrame)
+        };
+        uint32x4_t rng1 = vld1q_u32(seeds1);
 
-        float cr[4], cg[4], cb[4];
-        vst1q_f32(cr, vsetq_lane_f32(col[3].x,
-                vsetq_lane_f32(col[2].x,
-                vsetq_lane_f32(col[1].x,
-                vsetq_lane_f32(col[0].x, vdupq_n_f32(0.0f), 0),1),2),3));
+        vec3f col0[4], col1[4];
+        trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
 
-        vst1q_f32(cg, vsetq_lane_f32(col[3].y,
-                vsetq_lane_f32(col[2].y,
-                vsetq_lane_f32(col[1].y,
-                vsetq_lane_f32(col[0].y, vdupq_n_f32(0.0f), 0),1),2),3));
-
-        vst1q_f32(cb, vsetq_lane_f32(col[3].z,
-                vsetq_lane_f32(col[2].z,
-                vsetq_lane_f32(col[1].z,
-                vsetq_lane_f32(col[0].z, vdupq_n_f32(0.0f), 0),1),2),3));
-
+        // Accumulate into FB
         float scale = 1.0f / float(currentFrame + 1);
-        float32x4_t vScale = vdupq_n_f32(scale);
+        for (int k = 0; k < 4; k++) {
+            frameBuffer[base0+k].r += (col0[k].x - frameBuffer[base0+k].r) * scale;
+            frameBuffer[base0+k].g += (col0[k].y - frameBuffer[base0+k].g) * scale;
+            frameBuffer[base0+k].b += (col0[k].z - frameBuffer[base0+k].b) * scale;
+            frameBuffer[base0+k].a  = 1.0f;
 
-
-        for(int k=0;k<4;k++)
-        {
-            int idx = base + k;
-
-            frameBuffer[idx].r += (cr[k] - frameBuffer[idx].r) * scale;
-            frameBuffer[idx].g += (cg[k] - frameBuffer[idx].g) * scale;
-            frameBuffer[idx].b += (cb[k] - frameBuffer[idx].b) * scale;
-            frameBuffer[idx].a = 1.0f;
+            frameBuffer[base1+k].r += (col1[k].x - frameBuffer[base1+k].r) * scale;
+            frameBuffer[base1+k].g += (col1[k].y - frameBuffer[base1+k].g) * scale;
+            frameBuffer[base1+k].b += (col1[k].z - frameBuffer[base1+k].b) * scale;
+            frameBuffer[base1+k].a  = 1.0f;
         }
     }
 }
@@ -1118,7 +1257,7 @@ void workerThread(int id)
     int core = id;
     pinThread(core);
 
-    constexpr int tnum = 4;
+    constexpr int tnum = 8;
 
     while (running)
     {
@@ -1140,13 +1279,15 @@ void workerThread(int id)
                 if (startY >= height)
                     goto worker_done;
                 
-                int endY = std::min(startY + (tnum +TILE_H), height);
+                int endY = std::min(startY + TILE_H, height);
+                endY = std::min(endY, height);
+
                 renderTile(startY, endY, currentFrame);
     
             }
         }
         worker_done:
-        tilesDone.fetch_add(tnum, std::memory_order_relaxed);
+        tilesDone.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -1301,7 +1442,7 @@ void renderCPUFrame()
     tilesDone = 0;
     currentFrame = frame;
     nextTile = 0;
-    constexpr int tnum = 4;
+    constexpr int tnum = 8;
 
     {
         std::lock_guard<std::mutex> lock(workMutex);
@@ -1313,12 +1454,13 @@ void renderCPUFrame()
     // Main thread used as a worker
     while (true)
     {
-        int tileBase = nextTile.fetch_add(tnum, std::memory_order_relaxed);
+        int tileBase = nextTile.fetch_add(1, std::memory_order_relaxed);
         int startY = tileBase * TILE_H;
 
         if (startY >= height) break;
 
-        int endY = std::min(startY + (tnum * TILE_H), height);
+        int endY = std::min(startY + TILE_H, height);
+        endY = std::min(endY, height);
         renderTile(startY, endY, currentFrame);
     }
 
@@ -1327,7 +1469,10 @@ void renderCPUFrame()
     {
         __asm__ volatile("" ::: "memory");    
     }
+    
     workReady = false;
+    workCV.notify_all();
+
 }
 
 float getTime3()

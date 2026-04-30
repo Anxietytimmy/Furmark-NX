@@ -301,12 +301,13 @@ inline void dot8(const vec3x8& a, const vec3x8& b,
     out1 = vfmaq_f32(out1, a.z1, b.z1);
 }
 
-inline vec3x4 pack4_fast(const vec3f* __restrict__ v)
+inline vec3x4 pack4_fast(const vec3f*v)
 {
     // Treats 4 vec3f structs as 3 f32x4
-    float32x4x4_t raw = vld4q_f32(reinterpret_cast < const float *>(v));
+    // float32x4x4_t raw = vld4q_f32(reinterpret_cast < const float *>(v));
     // pad raw.val[#] = xyz
-    return { raw.val[0], raw.val[1], raw.val[2] };
+    // return { raw.val[0], raw.val[1], raw.val[2] };
+    return pack4(v);
 }
 
 inline vec3x4 clamp4(const vec3x4& v, float minv, float maxv){
@@ -371,7 +372,7 @@ inline float32x4_t sin4(float32x4_t phi) {
     const float32x4_t two_pi = vdupq_n_f32(6.28318531f);
 
     // Reduce [0, 2pi] -> [0, pi], track signs
-    uint32x4_t neg = = vcgeq_f32(phi, pi);
+    uint32x4_t neg = vcgeq_f32(phi, pi);
     float32x4_t xr = vbslq_f32(neg, vsubq_f32(phi, pi), phi);
 
     // Reduce [0, pi] -> [0, pi/2]
@@ -439,7 +440,7 @@ inline void buildONB4(const vec3x4& n, vec3x4& t, vec3x4& b){
     // tan = (1 + sign*nx²*a,  sign*bcoef,  -sign*nx)
     t.x = vaddq_f32(one, vmulq_f32(sgn, vmulq_f32(vmulq_f32(n.x, n.y), a)));
     t.y = vmulq_f32(sgn, bc);
-    t.z = vnegq_f32(vmulq_f32(sgn, nx));
+    t.z = vnegq_f32(vmulq_f32(sgn, n.x));
 
     // bitan = (bcoef,  sign + ny²*a,  -ny)
     b.x = bc;
@@ -460,7 +461,7 @@ inline vec3x4 cosineSampleHemisphere4(const vec3x4& n, uint32x4_t& rng){
     float32x4_t u2 = toFloat01(xorshift4(rng));
 
     // r = sqrt(u1), phi = 2*pi*u2
-    float32x4_t r = vrsqrtq_f32(u1);
+    float32x4_t r = vsqrtq_f32(u1);
     float32x4_t phi = vmulq_n_f32(u2, 6.28318531f);
 
     // local disk coord + hemisphere projection
@@ -470,7 +471,7 @@ inline vec3x4 cosineSampleHemisphere4(const vec3x4& n, uint32x4_t& rng){
 
     // build ONB from surface mat
     vec3x4 t, b;
-    buildOBN4(n, t, b);
+    buildONB4(n, t, b);
 
     // use world space 
     vec3x4 d;
