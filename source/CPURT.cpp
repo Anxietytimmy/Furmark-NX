@@ -884,7 +884,7 @@ void renderTile(int startY, int endY, int frameIndex)
 // Width is at 1280, so at 1280x16 the total size per thread is 655KB
 // TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
 // HOWEVER, this assumes tiles only include pixel data, which lmao
-const int TILE_H = 33;
+const int TILE_H = 34;
 
 void workerThread(int id)
 {
