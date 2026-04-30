@@ -509,92 +509,6 @@ bool intersectSphere(vec3f ro, vec3f rd, vec3f center, float r, float& t)
 }
 
 
-// Scene
-Hit intersectScene(vec3f ro, vec3f rd)
-{
-    Hit best;
-    best.t = 1e30f;
-    best.mat = WHITE;
-
-    float t;
-
-    const float eps = 1e-6f;
-
-    // mirror sphere
-    if(intersectSphere(ro,rd,vec3f(0,1,-0.5f),1.0f,t))
-    {
-        if(t < best.t)
-        {
-            best.t = t;
-            best.mat = MIRROR;
-            vec3f p = ro + rd*t;
-            best.normal = normalize(p - vec3f(0,1,-0.5f));
-        }
-    }
-
-    // left wall
-    if (fabs(rd.x) > eps) {
-        t = (-2.0f - ro.x) / rd.x;
-        if(t>0 && t<best.t) {
-            best.t = t;
-            best.mat = RED;
-            best.normal = vec3f(1,0,0);
-        }
-    }
-
-    // right wall
-    if (fabs(rd.x) > eps) {
-        t = (2.0f - ro.x) / rd.x;
-        if(t>0 && t<best.t) {
-            best.t = t;
-            best.mat = GREEN;
-            best.normal = vec3f(-1,0,0);
-        }
-    }
-
-    // floor
-    if (fabs(rd.y) > eps) {
-        t = (0.0f - ro.y) / rd.y;
-        if(t>0 && t<best.t) {
-            best.t = t;
-            best.mat = WHITE;
-            best.normal = vec3f(0,1,0);
-        }
-    }
-
-    // ceiling
-    if (fabs(rd.y) > eps) {
-        t = (4.0f - ro.y) / rd.y;
-        if(t>0 && t<best.t) {
-            vec3f hit = ro + rd * t;
-
-            if(fabs(hit.x) < 1.0f && fabs(hit.z) < 1.0f)
-                best.mat = LIGHT;
-            else
-                best.mat = WHITE;
-
-            best.t = t;
-            best.normal = vec3f(0,-1,0);
-        }
-    }
-
-    // back wall
-    if (fabs(rd.z) > eps) {
-        t = (2.0f - ro.z) / rd.z;
-        if(t>0 && t<best.t) {
-            best.t = t;
-            best.mat = WHITE;
-            best.normal = vec3f(0,0,-1);
-        }
-    }
-
-    if(best.t < 1e29f)
-        return best;
-
-    best.t = -1.0f;
-    return best;
-}
-
 struct RayPacket4 {
     vec3f ro[4];
     vec3f rd[4];
@@ -615,57 +529,6 @@ vec3f getColor(Material m){
 bool isLight(int m){ return m == LIGHT; }
 bool isMirror(int m){ return m == MIRROR;}
 
-// have this in case this explodes or something
-vec3f trace(vec3f ro, vec3f rd, uint32_t& rng)
-{
-    vec3f color(0.0f);
-    vec3f throughput(1.0f);
-
-    // Controls the amount of bounces that the rays are allowed to produce
-    for(int bounce=0; bounce<3; bounce++)
-    {
-        Hit h = intersectScene(ro,rd);
-
-        if(h.t < 0)
-        {
-            color += throughput * vec3f(0.7,0.8,1.0);
-            break;
-        }
-
-        vec3f pos = ro + rd*h.t;
-        vec3f n = h.normal;
-
-        // ceiling light
-        if(h.mat == LIGHT)
-        {
-            color += throughput * vec3f(12.0f);
-            break;
-        }
-
-        if(h.mat == MIRROR)
-        {
-            rd = reflect(rd,n);
-        }
-        else
-        {
-            vec3f r = normalize(vec3f(
-                randFloat(rng) * 2.0f - 1.0f,
-                randFloat(rng) * 2.0f - 1.0f,
-                randFloat(rng) * 2.0f - 1.0f
-            ));
-
-            if(dot(r, n) < 0.0f) r = -r;
-
-            rd = normalize(n + r);
-
-            throughput *= getColor(h.mat);
-        }
-
-        ro = pos + n * 0.001f;
-    }
-
-    return color;
-}
 
 // Neon scene intersection
 inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, uint32x4_t& mat, vec3x4& normal)
@@ -1152,25 +1015,6 @@ void pinThread(int core)
     svcSetThreadCoreMask(thread, core, 1ULL << core);
 }
 
-// Denoising sampler
-vec3f cpuPathTrace(float uvx, float uvy, float px, float py){
-    // convert uv values to screen space
-    float pxn = uvx * 2.0f - 1.0f;
-    float pyn = uvy * 2.0f - 1.0f;
-
-    pxn *= width / float(height);
-
-    // Camera setup
-    vec3f ro = vec3f(0, 2, -6);
-
-    vec3f rd = normalize(camForward + pxn * camRight + pyn * camUp);
-
-    uint32_t rng = uint32_t(px) * 1973u ^ uint32_t(py) * 9277u ^ uint32_t(frame) * 26699u | 1u;
-
-    vec3f  col = trace(ro, rd, rng);
-
-    return col;
-}
 
 int frameIndex = frame;
 
@@ -1504,9 +1348,6 @@ void CPURTSceneinit(){
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
 }
-
-vec3f cpuPathTrace(vec2f uv, vec2f fragCoord);
-
 
 // How did we get here
 // Heat Stroke Struck
