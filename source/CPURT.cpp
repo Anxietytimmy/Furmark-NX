@@ -1244,8 +1244,8 @@ void renderTile(int startY, int endY, int frameIndex)
         uint32x4_t vBase = vdupq_n_u32(baseIdx);
 
         // Gen offsets
-        static const uint32_t xOff0[4] = { (uint32_t)x*1973, (uint32_t)(x+1)*1973, (uint32_t)(x+2)*1973, (uint32_t)(x+3)*1973 };
-        static const uint32_t xOff1[4] = { (uint32_t)(x+4)*1973, (uint32_t)(x+5)*1973, (uint32_t)(x+6)*1973, (uint32_t)(x+7)*1973 };
+        const uint32_t xOff0[4] = { (uint32_t)x*1973, (uint32_t)(x+1)*1973, (uint32_t)(x+2)*1973, (uint32_t)(x+3)*1973 };
+        const uint32_t xOff1[4] = { (uint32_t)(x+4)*1973, (uint32_t)(x+5)*1973, (uint32_t)(x+6)*1973, (uint32_t)(x+7)*1973 };
 
         // Finalize seeds
         uint32x4_t rng0 = vaddq_u32(vBase, vld1q_u32(xOff0));
@@ -1491,7 +1491,7 @@ void CPURTSceneinit(){
     glGenTextures(1, &screenTex);
     glBindTexture(GL_TEXTURE_2D, screenTex);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
