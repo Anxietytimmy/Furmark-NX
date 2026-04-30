@@ -1206,7 +1206,7 @@ void renderTile(int startY, int endY, int frameIndex)
         int base1 = base0 + 4;
 
         // Prefetch FB
-        int prefetchIdx = base0 + 32;
+        int prefetchIdx = base0 + 64;
         if (prefetchIdx < width * height)
             __builtin_prefetch(&frameBuffer[prefetchIdx], 1, 3);
 
@@ -1491,7 +1491,9 @@ void CPURTSceneinit(){
     glGenTextures(1, &screenTex);
     glBindTexture(GL_TEXTURE_2D, screenTex);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+    // How the FUCK did adding an alpha channel increase power draw by shitloads
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
