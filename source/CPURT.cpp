@@ -471,7 +471,10 @@ inline float randFloat(uint32_t& state)
 // Use a single struct for pixel data
 struct alignas(16) PixelData { float r, g, b, a; };
 
-alignas(64) static PixelData* frameBuffer = nullptr;
+// NUH UH
+alignas(64) static PixelData * frameBuffers[2] = {nullptr, nullptr};
+alignas(64) static int currentRenderBuf = 0;
+alignas(64) static float currentScale = 1.0f;
 
 
 struct Hit {
@@ -1189,8 +1192,7 @@ void renderTile(int startY, int endY, int frameIndex)
     const uint32x4_t vC = vdupq_n_u32(1013904223);
 
     // Vars for FB
-    float scaleVal = 1.0f / float(currentFrame + 1);
-    float32x4_t vScale = vdupq_n_f32(scaleVal);
+    float32x4_t vScale = vdupq_n_f32(currentScale); 
     float32x4_t vOne = vdupq_n_f32(1.0f);
 
     for(int y = startY; y < endY; y++){
@@ -1206,9 +1208,9 @@ void renderTile(int startY, int endY, int frameIndex)
         int base1 = base0 + 4;
 
         // Prefetch FB
-        int prefetchIdx = base0 + 64;
+        int prefetchIdx = base0 + 32;
         if (prefetchIdx < width * height)
-            __builtin_prefetch(&frameBuffer[prefetchIdx], 1, 3);
+            __builtin_prefetch(&frameBuffers[currentRenderBuf][prefetchIdx], 1, 0);
 
         // Build pixel coord
         float32x4_t px0 = { float(x)+0.5f, float(x+1)+0.5f, float(x+2)+0.5f, float(x+3)+0.5f };
@@ -1276,8 +1278,9 @@ void renderTile(int startY, int endY, int frameIndex)
         // coca cloa espuma 
         // Enough crack hits
         // Loads 4 pixels assuming that RGBA is used which, see below
-        float* fbPtr0 = (float*)&frameBuffer[base0];
-        float* fbPtr1 = (float*)&frameBuffer[base1];
+        // Change using double buffer so we aren't waiting eons
+        float* fbPtr0 = (float*)&frameBuffers[0][base0];
+        float* fbPtr1 = (float*)&frameBuffers[0][base1];
 
         // load said 4 pixels into registers
         float32x4x4_t vFB0 = vld4q_f32(fbPtr0);
@@ -1317,7 +1320,7 @@ void renderTile(int startY, int endY, int frameIndex)
 // Width is at 1280, so at 1280x16 the total size per thread is 655KB
 // TX1 has 2MB of shared L2, so 655KB * 3 = 1965KB. 
 // HOWEVER, this assumes tiles only include pixel data, which lmao
-const int TILE_H = 8;
+const int TILE_H = 33;
 
 void workerThread(int id)
 {
@@ -1325,7 +1328,7 @@ void workerThread(int id)
     int core = id;
     pinThread(core);
 
-    constexpr int tnum = 8;
+    constexpr int tnum = 14;
 
     while (running)
     {
@@ -1479,12 +1482,14 @@ void CPURTSceneinit(){
     // Setup CPU for output
     int total = width * height;
 
-    // Allocate proper memory for CPU frame buffer
-    frameBuffer = (PixelData*)aligned_alloc(64, total * sizeof(PixelData));
-
-    // Zero out buffer
-    memset(frameBuffer, 0, total * sizeof(PixelData));
-
+    // Allocate proper memory for CPU frame buffers
+    frameBuffers[0] = (PixelData*)aligned_alloc(64, total * sizeof(PixelData));
+    frameBuffers[1] = (PixelData*)aligned_alloc(64, total * sizeof(PixelData));
+    
+    // Clear buffers
+    memset(frameBuffers[0], 0, total * sizeof(PixelData));
+    memset(frameBuffers[1], 0, total * sizeof(PixelData));
+    
     glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
 
 
@@ -1506,43 +1511,35 @@ vec3f cpuPathTrace(vec2f uv, vec2f fragCoord);
 // How did we get here
 // Heat Stroke Struck
 // Hell yeah death
-void renderCPUFrame()
+// Why the fuck?
+// there is an actual reason, its mainly because there are points where the cpu idles 
+// just waiting for the image to be submitted
+// Double buffer works now, so that only the main thread does GL work
+void startCPURender ()
 {
-    cpuRenderRunning = true;
+    currentRenderBuf = 0;
+    currentScale = 1.0f / float(frame + 1);
     tilesDone = 0;
     currentFrame = frame;
     nextTile = 0;
-    constexpr int tnum = 8;
-
     {
         std::lock_guard<std::mutex> lock(workMutex);
         workReady = true;
     }
-
     workCV.notify_all();
+}
 
-    // Main thread used as a worker
-    while (true)
-    {
-        int tileBase = nextTile.fetch_add(1, std::memory_order_relaxed);
-        int startY = tileBase * TILE_H;
-
-        if (startY >= height) break;
-
-        int endY = std::min(startY + TILE_H, height);
-        endY = std::min(endY, height);
-        renderTile(startY, endY, currentFrame);
-    }
-
-    // Wait for workers to finish
+// Once GL work is done, we ball
+// Wait for other threads are done with whatever they were given, then resets work signal
+void waitForRender()
+{
     while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
-    {
-        __asm__ volatile("" ::: "memory");    
-    }
-    
-    workReady = false;
+        __asm__("yield");
+        {
+            std::lock_guard<std::mutex> lock(workMutex);
+            workReady = false;
+        }
     workCV.notify_all();
-
 }
 
 float getTime3()
@@ -1552,10 +1549,8 @@ float getTime3()
     }
 
 
-void CPURTRender(){
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, width, height);
-
+void CPURTRender()
+{
     // FPS calculation
     u64 currentTime = armGetSystemTick();
     s_frameCount++;
@@ -1568,12 +1563,7 @@ void CPURTRender(){
         s_fpsUpdateTime = currentTime;
     }
 
-    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    // We want as much rendered as possible
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-
+    // Cam setup
     camPos = vec3f(0,2,-6);
     vec3f target = vec3f(0,2,0);
 
@@ -1581,42 +1571,76 @@ void CPURTRender(){
     camRight = normalize(cross(camForward, vec3f(0,1,0)));
     camUp = cross(camRight, camForward);
 
-    // draw CPU functions
-    renderCPUFrame();
+    // gawd dam
+    // take the current accumulation and display a copy before workers touch it 
+    memcpy(frameBuffers[1], frameBuffers[0], width * height * sizeof(PixelData));
 
-    // draw our first triangle
+    // Yeet workers into accumulation buffer [0]
+    currentRenderBuf = 0;
+    currentScale     = 1.0f / float(frame + 1);
+    tilesDone        = 0;
+    currentFrame     = frame;
+    nextTile         = 0;
+    {
+        std::lock_guard<std::mutex> lock(workMutex);
+        workReady = true;
+    }
+    workCV.notify_all();
+
+    // Yeah I am not leaving this with ye ol 20% cpu usage
+        while (true)
+    {
+        int tnum = 6;
+        int tileBase = nextTile.fetch_add(tnum, std::memory_order_relaxed);
+
+        for (int t = 0; t < tnum; t++)
+        {
+            int startY = (tileBase + t) * TILE_H;
+            if (startY >= height) goto main_done;
+            renderTile(startY, std::min(startY + TILE_H, height), currentFrame);
+        }
+    }
+    main_done:
+
+        // Wait for workers to finish
+    while (tilesDone.load(std::memory_order_acquire) < THREAD_COUNT)
+        __asm__("yield");
+    {
+        std::lock_guard<std::mutex> lock(workMutex);
+        workReady = false;
+    }
+    workCV.notify_all();
+
+    // Now, upload the memcpy we took before
+    // If workers are done or not, we don't give a shit since we read [1] now
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, height);
+    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
     glUseProgram(s_program);
-
-
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, screenTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, frameBuffer);
-    glBindVertexArray(0);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,GL_RGBA, GL_FLOAT, frameBuffers[1]);
     glBindVertexArray(s_vao);
-    
-    // Triangles, placed in your mind
-    // You will never be free
-    glDrawArrays(GL_TRIANGLES,0, 3);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glUniform1f(loc_time, getTime3());
-    glUniform2f(resolutionLoc, width, height); 
+    glUniform2f(resolutionLoc, width, height);
 
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-    frame++;
-
-    // Draw FPS counter
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
     drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
-
-    // Draw number of samples
     char sampleText[64];
     snprintf(sampleText, sizeof(sampleText), "Samples: %d", frame);
-    drawText(sampleText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+    drawText(sampleText, -0.95f, 0.85f, 0.02f, 1.0f, 0.0f, 0.0f);
+
+    eglSwapBuffers(s_display, s_surface);
+    frame++;
+
 }
 
 void CPURTExit()
@@ -1635,9 +1659,10 @@ void CPURTExit()
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
 
-    free(frameBuffer);
-    // cpuAccum.clear();
-    // cpuFrame.clear();
+    free(frameBuffers[0]);
+    free(frameBuffers[1]);
+    frameBuffers[0] = frameBuffers[1] = nullptr;
+
     frame = 0; 
 }
 
