@@ -153,39 +153,6 @@ inline vec3f cross(const vec3f& a, const vec3f& b) {
     );
 }
 
-
-// Well this is cursed
-// Scalar for neon functions
-inline vec3f neon_normalize(const vec3f& v)
-{
-    float len2 = v.x*v.x + v.y*v.y + v.z*v.z;
-    float inv = 1.0f / sqrtf(len2 + 1e-20f);
-    return { v.x * inv, v.y * inv, v.z * inv };
-}
-
-inline vec3f neon_reflect(const vec3f& v, const vec3f& n)
-{
-    float d = v.x*n.x + v.y*n.y + v.z*n.z;
-    return {
-        v.x - 2.0f * d * n.x,
-        v.y - 2.0f * d * n.y,
-        v.z - 2.0f * d * n.z
-    };
-}
-
-// More NEON helper functions
-inline float32x4_t selectf(uint32x4_t m, float32x4_t a, float32x4_t b) {
-    return vbslq_f32(m, a, b);
-}
-
-inline uint32x4_t selecti(uint32x4_t m, uint32x4_t a, uint32x4_t b) {
-    return vbslq_u32(m, a, b);
-}
-
-inline uint32x4_t andMask(uint32x4_t a, uint32x4_t b) {
-    return vandq_u32(a, b);
-}
-
 // fast reciprocals
 static inline float32x4_t fastRecip(float32x4_t x)
 {
@@ -219,23 +186,6 @@ static inline vec3x4 normalizeFast(const vec3x4& v)
     out.y = vmulq_f32(v.y, invLen);
     out.z = vmulq_f32(v.z, invLen);
     return out;
-}
-
-struct vec3x8 {
-    float32x4_t x0, x1;
-    float32x4_t y0, y1;
-    float32x4_t z0, z1;
-};
-
-
-inline void dot8(const vec3x8& a, const vec3x8& b,
-                 float32x4_t& out0, float32x4_t& out1){
-    out0 = vmulq_f32(a.x0, b.x0);
-    out1 = vmulq_f32(a.x1, b.x1);
-    out0 = vfmaq_f32(out0, a.y0, b.y0);
-    out1 = vfmaq_f32(out1, a.y1, b.y1);
-    out0 = vfmaq_f32(out0, a.z0, b.z0);
-    out1 = vfmaq_f32(out1, a.z1, b.z1);
 }
 
 
