@@ -463,6 +463,15 @@ alignas(64) static PixelData * frameBuffers[2] = {nullptr, nullptr};
 alignas(64) static int currentRenderBuf = 0;
 alignas(64) static float currentScale = 1.0f;
 
+// Instead of using accumulations in an average, we keep a buffer of the last samples
+// Then, we'll recompute the average from it
+// The math in question
+// F(x) = X * Y * HD * PD, where X and Y are given, HD is below, and PD is pixel data
+// so at our 1280 x 720 * 32 with 16b per pixel, this will use about 375MB
+static const int HISTORY_DEPTH = 32;
+static PixelData* sampleHistory = nullptr;
+static int historyHead = 0;
+
 // Neon scene intersection
 static inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, uint32x4_t& mat, vec3x4& normal)
 {
@@ -771,7 +780,6 @@ static void renderTile(int startY, int endY, int frameIndex)
     const uint32x4_t vC = vdupq_n_u32(1013904223);
 
     // Vars for FB
-    float32x4_t vScale = vdupq_n_f32(currentScale); 
     float32x4_t vOne = vdupq_n_f32(1.0f);
 
     for(int y = startY; y < endY; y++){
@@ -785,11 +793,6 @@ static void renderTile(int startY, int endY, int frameIndex)
     {
         int base0 = y * width + x;
         int base1 = base0 + 4;
-
-        // Prefetch FB
-        int prefetchIdx = base0 + 32;
-        if (prefetchIdx < width * height)
-            __builtin_prefetch(&frameBuffers[currentRenderBuf][prefetchIdx], 1, 0);
 
         // Build pixel coord
         float32x4_t px0 = { float(x)+0.5f, float(x+1)+0.5f, float(x+2)+0.5f, float(x+3)+0.5f };
@@ -839,43 +842,56 @@ static void renderTile(int startY, int endY, int frameIndex)
         vec3f col0[4], col1[4];
         trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
 
-        // Accumulate into FB
-        // coca cloa espuma 
-        // Enough crack hits
-        // Loads 4 pixels assuming that RGBA is used which, see below
-        // Change using double buffer so we aren't waiting eons
-        float* fbPtr0 = (float*)&frameBuffers[0][base0];
-        float* fbPtr1 = (float*)&frameBuffers[0][base1];
+        // Accumulate into a ring buffer instead
+        int total = width * height;
+        int slot = currentFrame % HISTORY_DEPTH;
+        int validSlots = std::min(currentFrame + 1, HISTORY_DEPTH);
+        float invSlots = 1.0f / float(validSlots);
 
-        // load said 4 pixels into registers
-        float32x4x4_t vFB0 = vld4q_f32(fbPtr0);
-        float32x4x4_t vFB1 = vld4q_f32(fbPtr1);
+        // Write the raw samples into a current slot, where each slot is the full FB sized hell
+        PixelData* slotBase = &sampleHistory[(size_t)slot * total];
+        for(int i = 0; i < 4; i++)
+        {
+            slotBase[base0 + i] = { col0[i].x, col0[i].y, col0[i].z, 1.0f };
+            slotBase[base1 + i] = { col1[i].x, col1[i].y, col1[i].z, 1.0f };
+        }
 
-        // convert col into new registers
-        // TBH it would be alot better to have trace8 return these as vectors, but I am lazy
-        float32x4_t vNewR0 = {col0[0].x, col0[1].x, col0[2].x, col0[3].x};
-        float32x4_t vNewG0 = {col0[0].y, col0[1].y, col0[2].y, col0[3].y};
-        float32x4_t vNewB0 = {col0[0].z, col0[1].z, col0[2].z, col0[3].z};
-        float32x4_t vNewR1 = {col1[0].x, col1[1].x, col1[2].x, col1[3].x};
-        float32x4_t vNewG1 = {col1[0].y, col1[1].y, col1[2].y, col1[3].y};
-        float32x4_t vNewB1 = {col1[0].z, col1[1].z, col1[2].z, col1[3].z};
+        // Sum across all valid slots for given pixels (8)
+        // Each loop reads from a slot about 14MB away from the last, so we miss L2 constantly
+        float32x4_t sumR0 = vdupq_n_f32(0.f), sumG0 = vdupq_n_f32(0.f), sumB0 = vdupq_n_f32(0.f);
+        float32x4_t sumR1 = vdupq_n_f32(0.f), sumG1 = vdupq_n_f32(0.f), sumB1 = vdupq_n_f32(0.f);
 
-        // actually accumulate this time
-        vFB0.val[0] = vfmaq_f32(vFB0.val[0], vsubq_f32(vNewR0, vFB0.val[0]), vScale);
-        vFB0.val[1] = vfmaq_f32(vFB0.val[1], vsubq_f32(vNewG0, vFB0.val[1]), vScale);
-        vFB0.val[2] = vfmaq_f32(vFB0.val[2], vsubq_f32(vNewB0, vFB0.val[2]), vScale);
-        vFB0.val[3] = vOne;
+        for (int s = 0; s < validSlots; s++)
+        {
+            const float* h0 = (const float*)&sampleHistory[(size_t)s * total + base0];
+            const float* h1 = (const float*)&sampleHistory[(size_t)s * total + base1];
 
-        // HA HA 
-        // O N E
-        vFB1.val[0] = vfmaq_f32(vFB1.val[0], vsubq_f32(vNewR1, vFB1.val[0]), vScale);
-        vFB1.val[1] = vfmaq_f32(vFB1.val[1], vsubq_f32(vNewG1, vFB1.val[1]), vScale);
-        vFB1.val[2] = vfmaq_f32(vFB1.val[2], vsubq_f32(vNewB1, vFB1.val[2]), vScale);
-        vFB1.val[3] = vOne;
+            // load 4 RGBA pixels as 4 seperate lanes
+            float32x4x4_t hv0 = vld4q_f32(h0);
+            float32x4x4_t hv1 = vld4q_f32(h1);
 
-        // Blast back into memory
-        vst4q_f32(fbPtr0, vFB0);
-        vst4q_f32(fbPtr1, vFB1);
+            sumR0 = vaddq_f32(sumR0, hv0.val[0]);
+            sumG0 = vaddq_f32(sumG0, hv0.val[1]);
+            sumB0 = vaddq_f32(sumB0, hv0.val[2]);
+            sumR1 = vaddq_f32(sumR1, hv1.val[0]);
+            sumG1 = vaddq_f32(sumG1, hv1.val[1]);
+            sumB1 = vaddq_f32(sumB1, hv1.val[2]);
+        }
+
+        // Average out, then write back to final FB
+        float32x4x4_t out0, out1;
+        out0.val[0] = vmulq_n_f32(sumR0, invSlots);
+        out0.val[1] = vmulq_n_f32(sumG0, invSlots);
+        out0.val[2] = vmulq_n_f32(sumB0, invSlots);
+        out0.val[3] = vOne;
+
+        out1.val[0] = vmulq_n_f32(sumR1, invSlots);
+        out1.val[1] = vmulq_n_f32(sumG1, invSlots);
+        out1.val[2] = vmulq_n_f32(sumB1, invSlots);
+        out1.val[3] = vOne;
+
+        vst4q_f32((float*)&frameBuffers[0][base0], out0);
+        vst4q_f32((float*)&frameBuffers[0][base1], out1);
     }
 }
 }
@@ -1054,6 +1070,12 @@ void CPURBSceneinit(){
     // Clear buffers
     memset(frameBuffers[0], 0, total * sizeof(PixelData));
     memset(frameBuffers[1], 0, total * sizeof(PixelData));
+
+    // Allocate stupid amounts of memory
+    //
+    size_t histSize = (size_t)width * height * HISTORY_DEPTH * sizeof(PixelData);
+    sampleHistory = (PixelData*)aligned_alloc(64, histSize);
+    memset(sampleHistory, 0, histSize);
     
     glUniform1i(glGetUniformLocation(s_program, "screenTex"), 0);
 
@@ -1226,6 +1248,9 @@ void CPURBExit()
     free(frameBuffers[0]);
     free(frameBuffers[1]);
     frameBuffers[0] = frameBuffers[1] = nullptr;
+
+    free(sampleHistory);
+    sampleHistory = nullptr;
 
     frame = 0; 
 }
