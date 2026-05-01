@@ -22,6 +22,7 @@
 #include "fmrkRAM.h"
 #include "GPUPT.H"
 #include "CPURT.h"
+#include "CPURB.h"
 
 
 // NX Link Support
@@ -57,7 +58,7 @@ enum MenuOption {
     MENU_GPU_PT,
     MENU_BH_RT,
     MENU_CPU_RT,
-    MENU_CPU_RAMBURN,
+    MENU_CPU_RB,
     MENU_EXIT,
     MENU_COUNT
 };
@@ -229,6 +230,15 @@ int main(int argc,char* argv[]){
                                 state = STATE_CPU_RT;
                             }
                             break;
+                        
+                        case MENU_CPU_RB:
+                            consoleExit(NULL);
+                            if(initEgl(nwindowGetDefault())){
+                                gladLoadGL();
+                                CPURBSceneinit();
+                                state = STATE_CPU_RB;
+                            }
+                            break;
 
                         case MENU_EXIT:
                             goto exit_app;
@@ -292,6 +302,20 @@ int main(int argc,char* argv[]){
                     state = STATE_MENU;
                 } else {
                     CPURTRender();
+                    eglSwapBuffers(s_display, s_surface);
+                }
+                break;
+                }
+
+            case STATE_CPU_RB: {
+                if(kDown &HidNpadButton_B){
+                    CPURBExit();
+                    deinitEgl();
+                    consoleInit(NULL);
+                    drawMenu(selectedItem);
+                    state = STATE_MENU;
+                } else {
+                    CPURBRender();
                     eglSwapBuffers(s_display, s_surface);
                 }
                 break;
