@@ -793,7 +793,8 @@ static void Disasterpiece(int threadID)
     // Stream accross every buffer
     for (int b = 0; b < FB_COUNT; b++)
     {
-        Iowa(frameBuffers[b], start, end);
+        Iowa(frameBuffers[2], start, end);
+        Iowa(frameBuffers[3], start, end);
     }
 }
 
