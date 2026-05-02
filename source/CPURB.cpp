@@ -1062,7 +1062,7 @@ void CPURBSceneinit(){
         glm::radians(40.0f),
         1280.0f / 720.0f,
         0.01f,
-        1000.0f
+        500.0f
     );
     glUniformMatrix4fv(loc_projMtx, 1, GL_FALSE, glm::value_ptr(projMtx));
 
@@ -1271,6 +1271,10 @@ void CPURBExit()
     free(frameBuffers[0]);
     free(frameBuffers[1]);
     frameBuffers[0] = frameBuffers[1] = nullptr;
+
+    free(frameBuffers[2]);
+    free(frameBuffers[3]);
+    frameBuffers[2] = frameBuffers[3] = nullptr;
 
     frame = 0; 
 }
