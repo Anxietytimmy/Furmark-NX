@@ -73,7 +73,7 @@ static const MenuEntry s_menuEntries[MENU_COUNT] = {
     {"Furmark (48 Step)", 6},
     {"Furmark (RAM Texture stress)", 7},
     {"GPU PathTracing", 8},
-    {"GPU RT Black Hole", 9},
+    {"GPU + CPU Black Hole", 9},
     {"CPU Ray Tracing", 10},
     {"CPU RAM Stress", 11},
     {"Exit", 12}
