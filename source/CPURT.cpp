@@ -1021,6 +1021,15 @@ void CPURTSceneinit(){
     glUniformMatrix4fv(loc_projMtx, 1, GL_FALSE, glm::value_ptr(projMtx));
 
     s_startTicks = armGetSystemTick();
+
+    // Cam setup
+    // We only need to compute this ONCE since the scene is static
+    camPos = vec3f(0,2,-6);
+    vec3f target = vec3f(0,2,0);
+
+    camForward = normalize(target - camPos);
+    camRight = normalize(cross(camForward, vec3f(0,1,0)));
+    camUp = cross(camRight, camForward);
     
     // Initialize FPS counter
     s_lastFrameTime = s_startTicks;
@@ -1123,14 +1132,6 @@ void CPURTRender()
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;
     }
-
-    // Cam setup
-    camPos = vec3f(0,2,-6);
-    vec3f target = vec3f(0,2,0);
-
-    camForward = normalize(target - camPos);
-    camRight = normalize(cross(camForward, vec3f(0,1,0)));
-    camUp = cross(camRight, camForward);
 
     // gawd dam
     // take the current accumulation and display a copy before workers touch it 
