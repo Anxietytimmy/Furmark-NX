@@ -422,6 +422,11 @@ static GLuint createAndCompileShader(GLenum type, const char* source)
 static int width = 1280;
 static int height = 720;
 
+// Render resolutions, lower because while stil having to be compute intensive,
+// 1280x720 reduces performance enough that less of the ram is stressed as a result.
+static int RW = 640;
+static int RH = 360;
+
 static GLuint screenTex;
 
 // needed vars
@@ -443,6 +448,7 @@ alignas(64) static int currentFrame = 0;
 
 alignas(64) static std::atomic<bool> cpuRenderRunning(false);
 
+// Name our materials
 enum Material{
     WHITE,
     RED,
@@ -634,6 +640,7 @@ static inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f 
         color0.z = vbslq_f32(miss0, vaddq_f32(color0.z, vmulq_f32(tput0.z, vdupq_n_f32(1.0f))), color0.z);
         color1.z = vbslq_f32(miss1, vaddq_f32(color1.z, vmulq_f32(tput1.z, vdupq_n_f32(1.0f))), color1.z);
 
+        // Kill rays as they come
         alive0 = vandq_u32(alive0, hit0);
         alive1 = vandq_u32(alive1, hit1);
 
@@ -749,6 +756,8 @@ static void pinThread(int core)
 }
 
 // Bandwidth function
+// Shrimple load + store with large data function, we can't make it much larger as we actually run out of memory
+// 
 static void inline Iowa(PixelData * buf, int start, int end)
 {
     const float32x4_t add = vdupq_n_f32(0.001f);
@@ -806,9 +815,9 @@ static int frameIndex = frame;
 static void renderTile(int startY, int endY, int frameIndex)
 {
     // Convert to UV
-    const float32x4_t invW = vdupq_n_f32(1.0f / width);
-    const float32x4_t invH = vdupq_n_f32(1.0f / height);
-    const float aspect = float(width) / float(height);
+    const float32x4_t invW = vdupq_n_f32(1.0f / RW);
+    const float32x4_t invH = vdupq_n_f32(1.0f / RH);
+    const float aspect = float(RW) / float(RH);
 
     const float32x4_t half = vdupq_n_f32(0.5f);
     const float32x4_t two  = vdupq_n_f32(2.0f);
@@ -829,9 +838,9 @@ static void renderTile(int startY, int endY, int frameIndex)
     float32x4_t uvy = vmulq_f32(py, invH);
     float32x4_t sy = vsubq_f32(vmulq_f32(uvy, two), one);
 
-    for(int x = 0; x <= width-8; x += 8)
+    for(int x = 0; x <= RW-8; x += 8)
     {
-        int base0 = y * width + x;
+        int base0 = y * RW + x;
         int base1 = base0 + 4;
 
         // Build pixel coord
@@ -959,8 +968,8 @@ static void workerThread(int id)
                 if (startY >= height)
                     goto worker_done;
                 
-                int endY = std::min(startY + TILE_H, height);
-                endY = std::min(endY, height);
+                int endY = std::min(startY + TILE_H, RH);
+                endY = std::min(endY, RH);
 
                 renderTile(startY, endY, currentFrame);
                 Disasterpiece(id);
@@ -1022,7 +1031,7 @@ void CPURBSceneinit(){
     {
         // Generate texture
         glBindTexture(GL_TEXTURE_2D, tex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, RW, RH, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -1107,7 +1116,7 @@ void CPURBSceneinit(){
 
     // How the FUCK did adding an alpha channel increase power draw by shitloads
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, RW, RH, 0, GL_RGBA, GL_FLOAT, nullptr);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -1179,7 +1188,7 @@ void CPURBRender()
 
     // gawd dam
     // take the current accumulation and display a copy before workers touch it 
-    memcpy(frameBuffers[1], frameBuffers[0], width * height * sizeof(PixelData));
+    memcpy(frameBuffers[1], frameBuffers[0], RW * RH * sizeof(PixelData));
 
     // Yeet workers into accumulation buffer [0]
     currentRenderBuf = 0;
@@ -1204,8 +1213,8 @@ void CPURBRender()
         for (int t = 0; t < tnum; t++)
         {
             int startY = (tileBase + t) * TILE_H;
-            if (startY >= height) goto main_done;
-            renderTile(startY, std::min(startY + TILE_H, height), currentFrame);
+            if (startY >= RH) goto main_done;
+            renderTile(startY, std::min(startY + TILE_H, RH), currentFrame);
             Disasterpiece(0);
         }
     }
@@ -1232,7 +1241,7 @@ void CPURBRender()
     glUseProgram(s_program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, screenTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,GL_RGBA, GL_FLOAT, frameBuffers[1]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, RW, RH,GL_RGBA, GL_FLOAT, frameBuffers[1]);
     glBindVertexArray(s_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
