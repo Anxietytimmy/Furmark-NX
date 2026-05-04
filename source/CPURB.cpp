@@ -965,7 +965,7 @@ static void workerThread(int id)
                 int tile = tileBase + t;
                 int startY = tile * TILE_H;
 
-                if (startY >= height)
+                if (startY >= RH)
                     goto worker_done;
                 
                 int endY = std::min(startY + TILE_H, RH);
