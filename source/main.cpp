@@ -23,6 +23,7 @@
 #include "GPUPT.H"
 #include "CPURT.h"
 #include "CPURB.h"
+#include "BHRT.h"
 
 
 // NX Link Support
@@ -240,6 +241,15 @@ int main(int argc,char* argv[]){
                             }
                             break;
 
+                        case MENU_BH_RT:
+                            consoleExit(NULL);
+                            if(initEgl(nwindowGetDefault())){
+                                gladLoadGL();
+                                BHRTSceneInit();
+                                state = STATE_BH_RT;
+                            }
+                            break;
+
                         case MENU_EXIT:
                             goto exit_app;
                         
@@ -321,7 +331,19 @@ int main(int argc,char* argv[]){
                 break;
                 }
 
-
+            case STATE_BH_RT: {
+                if(kDown &HidNpadButton_B){
+                    BHRTExit();
+                    deinitEgl();
+                    consoleInit(NULL);
+                    drawMenu(selectedItem);
+                    state = STATE_MENU;
+                } else {
+                    BHRTRender();
+                    eglSwapBuffers(s_display, s_surface);
+                }
+                break;
+                }
             }
         }
     
