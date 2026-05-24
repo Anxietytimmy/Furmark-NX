@@ -855,11 +855,113 @@ static const char* const fragmentShaderSource = R"text(
     }
 )text";
 
+// Bloom shaders
+// Extracts bright areas and downsamples to .25x res
+static const char* const bloom_extract_fs = R"text(
+#version 330 core
+in vec2 uv;
+out vec4 fragColor;
+uniform sampler2D sceneTex;
+uniform float threshold;
+
+void main() {
+    vec3 color = texture(sceneTex, uv).rgb;
+    // Luminance val
+    float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    // Softer fall off instead of hard edges
+    float contrib = smoothstep(threshold, threshold + 0.3, brightness);
+    fragColor = vec4(color * contrib, 1.0);
+}
+)text";
+
+// Gaussian blur, runs once on X/Y
+static const char* const bloom_blur_fs = R"text(
+#version 330 core
+in vec2 uv;
+out vec4 fragColor;
+uniform sampler2D blurTex;
+uniform vec2 direction;   // (1,0) or (0,1)
+uniform vec2 texelSize;   // 1.0 / vec2(BLOOM_W, BLOOM_H)
+
+// 9-tap Gaussian weights
+const float weight[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
+
+void main() {
+    vec3 result = texture(blurTex, uv).rgb * weight[0];
+    vec2 step = direction * texelSize;
+    for (int i = 1; i < 5; i++) {
+        result += texture(blurTex, uv + step * float(i)).rgb * weight[i];
+        result += texture(blurTex, uv - step * float(i)).rgb * weight[i];
+    }
+    fragColor = vec4(result, 1.0);
+}
+)text";
+
+// Adds blur on top of the final scene
+static const char* const bloom_composite_fs = R"text(
+#version 330 core
+in vec2 uv;
+out vec4 fragColor;
+uniform sampler2D sceneTex;
+uniform sampler2D bloomTex;
+uniform float bloomStrength;
+
+void main() {
+    vec3 scene = texture(sceneTex, uv).rgb;
+    vec3 bloom  = texture(bloomTex, uv).rgb;
+
+    //Make sure that bloom never darkens
+    vec3 result = scene + bloom * bloomStrength;
+
+    // Make sure that the bloom doesn't snap to white
+    result = result / (result + vec3(1.0));
+
+    fragColor = vec4(result, 1.0);
+}
+)text";
+
+
 static GLint res;
 static GLuint tex1;
 static GLuint tex2;
 static GLint resloc;
 
+// I find you facinating
+static GLuint s_bloomExtractProg;
+static GLuint s_bloomBlurProg;
+static GLuint s_bloomCompositeProg;
+
+static GLuint s_sceneFbo,   s_sceneTex;
+static GLuint s_bloomFboA,  s_bloomTexA;
+static GLuint s_bloomFboB,  s_bloomTexB;
+
+// Relax, its over
+// Direction/texel sizes 
+static GLint  s_blur_dirLoc;
+static GLint  s_blur_texelLoc;
+static GLint  s_composite_bloomStrengthLoc;
+
+// Lay you down to sleep
+// Quarter res bloom because I'm lazy
+static const int BLOOM_W = 320;
+static const int BLOOM_H = 180;
+
+// Create bloom textures
+static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
+{
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 // Man we are FUCKED
 
@@ -958,6 +1060,59 @@ void BHRTSceneInit()
     
     // Initialize text renderer for FPS display
     initTextRenderer();    
+
+    // Bloom start
+    makeFbo(s_sceneFbo, s_sceneTex, 1280, 720);
+    makeFbo(s_bloomFboA, s_bloomTexA, BLOOM_W, BLOOM_H);
+    makeFbo(s_bloomFboB, s_bloomTexB, BLOOM_W, BLOOM_H);
+
+    // Comp bloom shaders
+    GLuint bvsh = createAndCompileShader(GL_VERTEX_SHADER, rt_vs);
+
+    auto linkBloom = [&](const char* fs) -> GLuint {
+        GLuint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fs);
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, bvsh);
+        glAttachShader(prog, fsh);
+        glLinkProgram(prog);
+        glDeleteShader(fsh);
+
+        GLint ok; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char buf[512]; 
+            glGetProgramInfoLog(prog, sizeof buf, nullptr, buf);
+            FILE* f = fopen("/switch/bhrt_err.txt", "a");
+            if (f) { fprintf(f, "Bloom Link:\n%s\n", buf); fclose(f); }
+        }
+        return prog;
+    };
+
+    // Link bloom shit
+    
+    s_bloomExtractProg = linkBloom(bloom_extract_fs);
+    s_bloomBlurProg = linkBloom(bloom_blur_fs);
+    s_bloomCompositeProg = linkBloom(bloom_composite_fs);
+    glDeleteShader(bvsh);
+
+    // Cache locations
+    glUseProgram(s_bloomExtractProg);
+    glUniform1i(glGetUniformLocation(s_bloomExtractProg, "sceneTex"), 0);
+    glUniform1f(glGetUniformLocation(s_bloomExtractProg, "threshold"), 0.6f);
+
+    glUseProgram(s_bloomBlurProg);
+    glUniform1i(glGetUniformLocation(s_bloomBlurProg, "blurTex"), 0);
+    s_blur_dirLoc = glGetUniformLocation(s_bloomBlurProg, "direction");
+    s_blur_texelLoc = glGetUniformLocation(s_bloomBlurProg, "texelSize");
+    glUniform2f(s_blur_texelLoc, 1.0f / BLOOM_W, 1.0f / BLOOM_H);
+
+    glUseProgram(s_bloomCompositeProg);
+    glUniform1i(glGetUniformLocation(s_bloomCompositeProg, "sceneTex"), 0);
+    glUniform1i(glGetUniformLocation(s_bloomCompositeProg, "bloomTex"), 1);
+    s_composite_bloomStrengthLoc = glGetUniformLocation(s_bloomCompositeProg, "bloomStrength");
+    glUniform1f(s_composite_bloomStrengthLoc, 1.4f);
+
+    glUseProgram(s_program);
+
 }
 float getTime5()
     {
@@ -977,26 +1132,64 @@ void BHRTRender()
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;
     }
-    
-    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+
+    glBindVertexArray(s_vao);
+
+    // RT + Scene
+    glBindFramebuffer(GL_FRAMEBUFFER, s_sceneFbo);
+    glViewport(0, 0, 1280, 720);
     glClear(GL_COLOR_BUFFER_BIT);
-
     glUseProgram(s_program);
-    glActiveTexture(GL_TEXTURE0);
+    glActiveTexture(GL_TEXTURE0); 
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
-    glActiveTexture(GL_TEXTURE1);
+    glActiveTexture(GL_TEXTURE1); 
     glBindTexture(GL_TEXTURE_2D, tex2);
-
     glUniform1f(loc_time, getTime5());
-    glUniform2f(resloc, 1280.0f, 720.0f); // technically any resolution would work, but 1280x720 is actually visible.
-    glBindVertexArray(s_vao); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
+    glUniform2f(resloc, 1280.0f, 720.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // Draw FPS counter
+    // Brightness to bloom
+    glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboA);
+    glViewport(0, 0, BLOOM_W, BLOOM_H);
+    glUseProgram(s_bloomExtractProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_sceneTex);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // Actual blur, setup iterations
+    glUseProgram(s_bloomBlurProg);
+    const int BLUR_ITERATIONS = 3;
+    for (int i = 0; i < BLUR_ITERATIONS; i++) {
+        // A -> B Horizontal
+        glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboB);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, s_bloomTexA);
+        glUniform2f(s_blur_dirLoc, 1.0f, 0.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // B -> A Vertical
+        glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboA);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform2f(s_blur_dirLoc, 0.0f, 1.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    // compose -> scene
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 1280, 720);
+    glUseProgram(s_bloomCompositeProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_sceneTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, s_bloomTexA);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // Fps
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
-    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+    drawText(fpsText, - 0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+
 }
 
 void BHRTExit()
