@@ -326,7 +326,7 @@ static void setMesaConfig()
     // Uncomment below to enable shader debugging in Nouveau:
     //setenv("NV50_PROG_OPTIMIZE", "0", 1);
     //setenv("NV50_PROG_DEBUG", "1", 1);
-    //setenv("NV50_PROG_CHIPSET", "0x120", 1);
+    setenv("NV50_PROG_CHIPSET", "0x120", 1);
 }
     // vertex shader just to get anything on screen
 static const char* const vertexShaderSource = R"text(

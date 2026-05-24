@@ -28,6 +28,7 @@
 #include "sates.h"
 #include "vec23.h"
 #include "stb_image.h"
+#include "colormap_png.h"
 
 // nxlink support
 //-----------------------------------------------------------------------------
@@ -895,10 +896,13 @@ void BHRTSceneInit()
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glEnableVertexAttribArray(0);
 
+    int width, height, nchan;
+    stbi_set_flip_vertically_on_load(false);
+
     // Make a dummy cube map for testing
     glGenTextures(1, &tex1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
-    unsigned char px[3] = {10, 10, 30}; // Dark blue color
+    unsigned char px[3] = {0, 0, 0}; // Black test
     for (int f = 0; f < 6; f++){
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
     }
@@ -909,16 +913,21 @@ void BHRTSceneInit()
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     // Dummy 2D color (1x1 orange)
+
+
     glGenTextures(1, &tex2);
     glBindTexture(GL_TEXTURE_2D, tex2);
-    unsigned char zx[3] = {255, 140, 20};
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, zx);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    stbi_uc* img = stbi_load_from_memory((const stbi_uc*)colormap_png, colormap_png_size, &width, &height, &nchan, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    stbi_image_free(img);
+
 
     glUseProgram(s_program);
 
-    glUniform1i(tex1loc, 0);
     glUniform1i(tex2loc, 1);
 
 
@@ -934,8 +943,13 @@ void BHRTSceneInit()
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
+    glUniform1i(tex1loc, 0);
+
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex2);
+    glUniform1i(tex2loc, 1);
+
+
 
     // Initialize FPS counter
     s_lastFrameTime = s_startTicks;
