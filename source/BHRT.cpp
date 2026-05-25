@@ -507,9 +507,8 @@ static const char* const fragmentShaderSource = R"text(
     uniform float fovScale = 1.0;
 
     // Accretion disk
-    uniform float adiskParticle = 1.0;
     uniform float adiskHeight = 0.1;
-    uniform float adiskLit = 0.5;
+    uniform float adiskLit = 5;
     uniform float adiskDensityV = 2.0;
     uniform float adiskDensityH = 1.5;
     uniform float adiskNoiseScale = 0.4;
@@ -735,92 +734,103 @@ static const char* const fragmentShaderSource = R"text(
     // Accretion Disc
     // for laughs, I tried running this bullshit on my PC with a 5060, at 1080p this thing was dying
     // I am terrified at how its going to run on NX
-    void adiskColor(vec3 pos, inout vec3 color, inout float alpha, float stepSize) {
+    void adiskColor(vec3 pos, inout vec3 color, inout float alpha, float stepSize, vec3 dir) {
         float innerRadius = 2.6;
         float outerRadius = 12.0;
 
         //Accertion disks increase in density the closer we get to the event horizon
-        float density = max(0.0, 1.0 - length(pos.xyz / vec3(outerRadius, adiskHeight, outerRadius)));
+        float thinDiskHeight = 0.02;
+        float density = max(0.0, 1.0 - length(pos.xyz / vec3(outerRadius, thinDiskHeight, outerRadius)));
         if (density < 0.001) {
             return;
         }
 
-        density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV * 4.0);
 
         // Set particles to 0 once we go past the innermost circular orbit
-        // Also fade much more smoothly than before
-        density *= smoothstep(innerRadius, innerRadius + 0.5, length(pos.xz));
+        density *= pow(1.0 - abs(pos.y) / thinDiskHeight, 16.0);
+        density *= smoothstep(innerRadius, innerRadius + 0.4, length(pos.xz));
 
         // Dont compute if the density is tiny
         if (density < 0.003) {
             return;
         }
 
-        vec3 sphericalCoord = toSpherical(pos);
-
-        // Scale rho/phi so particles appear at the correct scale
-        sphericalCoord.y *= 18.0;
-        sphericalCoord.z *= 0.4;
-        sphericalCoord.x *= 0.6;
-
-        if (adiskParticle < 0.5){
-            color += vec3(0.0, 1.0, 0.0) * density * 0.02;
-            return;
-        }
-
+        float r = length(pos.xz);
         float noise = 1.0;
         float amp = 1.0;
-        float freq = 1.0;
+        
+        // Noise texture parameters
         #define NOISE_LOD 5
         for (int i = 0; i < NOISE_LOD; i++) {
-            float r = length(pos.xz);
             float theta = atan(pos.z, pos.x);
-            float orbitalSpeed = 2.0 / pow(max(r, 0.2), 1.5);
+            float orbitalSpeed = 2.5 / pow(max(r, 0.2), 1.5);
 
-            float turbulence = texture(noiseTex, pos * 0.08).r;
-            theta += turbulence * 0.4;
+            float turbulence = texture(noiseTex, pos * 0.1).r;
+            theta += turbulence * 0.5;
 
-            vec3 flowCoord = vec3(theta * 2.5, pos.y * 1.5, log(r + 1.0) * 2.0);
-
+            // Compress the shit out of r to stretch noise into circles
+            vec3 flowCoord = vec3(theta * 4.0, pos.y * 5.0, log(r + 1.0) * 25.0);
             flowCoord.x += time * orbitalSpeed;
 
-            vec3 warp = texture(noiseTex, flowCoord * 0.15).rgb;
-            warp = warp * 2.0 - 1.0;
-            flowCoord += warp * 0.25;
+            vec3 warp = texture(noiseTex, flowCoord * 0.1).rgb * 2.0 - 1.0;
+            flowCoord += warp * 0.3;
 
-            float n = texture(noiseTex, fract(flowCoord)).r;
-            n = n * 2.0 - 1.0;
-
+            float n = texture(noiseTex, fract(flowCoord)).r * 2.0 - 1.0;
             noise += n * amp;
-
-            freq *= 2.0;
             amp *= 0.5;
         }
         #undef NOISE_LOD
-        noise = abs(noise);
+        noise = max(0.0, abs(noise));
 
-        float radialT = clamp((length(pos.xz) - innerRadius) / (outerRadius - innerRadius), 0.0, 1.0);
+        // Add dopler shifiting
+        // Basically, in a black hole the accretion disk is spinning so rapidly that it significantly changes light
+        // The side approaching the obvserver will be blueshifted, while the opposing side will be redshifted
         
+        // Disc rotation
+        vec3 orbitalVelDir = normalize(vec3(-pos.z, 0.0, pos.x));
+
+        // Vel approximation
+        float speed = clamp(0.65 / sqrt(max(r, 2.0)), 0.0, 0.6);
+        vec3 velocityVector = orbitalVelDir * speed;
+
+        // Dot product between orbital velocity and C towards camera
+        float cosTheta = dot(velocityVector, -normalize(dir));
+
+        // Lorentz factor (time dialation)
+        // Stay with me, as we cross the empty skies
+        float gamma = 1.0 / sqrt(1.0 - speed * speed);
+        
+        // Come sail with me
+        float doppler = 1.0 / (gamma * (1.0 - cosTheta * speed));
+
+        // Time, Shift
+        // We discover the entry
+        // To other planes
         // accretion disk colors, based on their distance
-        vec3 innerColor = vec3(1.0, 0.85, 0.5);
+        // Apply whitening with blue shift
+        vec3 innerColor = vec3(1.0, 0.85, 0.5) * pow(doppler, 1.5);
         vec3 midColor = vec3(0.9, 0.35, 0.05);
         vec3 outerColor = vec3(0.3, 0.05, 0.02);
 
-        vec3 dustColor;
-        if (radialT < 0.3) {
-            dustColor = mix(innerColor, midColor, radialT / 0.3);
-        } else {
-            dustColor = mix(midColor, outerColor, (radialT - 0.3) / 0.7);
-        }
+        // Stay with me
+        // Come sail with me
+        float radialT = clamp((r - innerRadius) / (outerRadius - innerRadius), 0.0, 1.0);
+        vec3 dustColor = (radialT < 0.2) ? mix(innerColor, midColor, radialT / 0.2)
+        : mix(midColor, outerColor, (radialT - 0.2) / 0.8);
 
-        dustColor *= 1.0 + 4.0 * pow(1.0 - radialT, 3.0);
+        // We fly in dreams
+        // As we cross the space and time
+        // Just stay with me
+        // Scaling factor for relativistic beaming (scales @3.5/4^)
+        float beaming = pow(doppler, 4.0);
+
 
         // Scale colors and attenuate alpha for volumetric depth
         // Controls disk opacity
-        float absorption = 1.5;
-        float sampleAlpha = clamp(density * noise * stepSize * absorption, 0.0, 1.0);
+        float absorption = 2.5;
+        float sampleAlpha = clamp(density * noise * stepSize * absorption * beaming, 0.0, 1.0);
 
-        color += dustColor * adiskLit * sampleAlpha * alpha;
+        color += dustColor * adiskLit * sampleAlpha * alpha * beaming;
 
         // Attenuate alpha for realistic occlusion
         alpha *= (1.0 - sampleAlpha);
@@ -853,7 +863,7 @@ static const char* const fragmentShaderSource = R"text(
             if (dot(pos, pos) < 1.0) return color;
 
             // pass dynamic step sizes
-            adiskColor(pos, color, alpha, stepSize);
+            adiskColor(pos, color, alpha, stepSize, dir);
             
             pos += dir * stepSize;
         }
@@ -1162,7 +1172,7 @@ float snoise_cpu(float v_x, float v_y, float v_z)
 // Make a 64^3 texture for the accretion disk
 static void buildNoise3()
 {
-    const int N = 64;
+    const int N = 128;
     std::vector<uint8_t> data(N * N * N);
     for (int z = 0; z < N; z++)
     for (int y = 0; y < N; y++)
