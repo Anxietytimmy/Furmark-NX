@@ -479,6 +479,7 @@ static const char* const vertexShaderSource = R"text(
 
 static const char* const fragmentShaderSource = R"text(
     #version 330 core
+    
 
     // Constants
     const float PI = 3.14159265359;
@@ -507,11 +508,11 @@ static const char* const fragmentShaderSource = R"text(
 
     // Accretion disk
     uniform float adiskParticle = 1.0;
-    uniform float adiskHeight = 0.2;
-    uniform float adiskLit = 0.4;
-    uniform float adiskDensityV = 1.0;
-    uniform float adiskDensityH = 1.0;
-    uniform float adiskNoiseScale = 1.0;
+    uniform float adiskHeight = 0.12;
+    uniform float adiskLit = 0.5;
+    uniform float adiskDensityV = 2.0;
+    uniform float adiskDensityH = 1.5;
+    uniform float adiskNoiseScale = 0.7;
     uniform float adiskNoiseLOD = 5.0;
     uniform float adiskSpeed = 0.5;
 
@@ -744,11 +745,11 @@ static const char* const fragmentShaderSource = R"text(
             return;
         }
 
-        density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV);
+        density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV * 4.0);
 
         // Set particles to 0 once we go past the innermost circular orbit
 
-        density *= smoothstep(innerRadius, innerRadius * 1.1, length(pos));
+        density *= smoothstep(outerRadius, outerRadius * 0.85, length(pos));
 
         // Dont compute if the density is tiny
         if (density < 0.003) {
@@ -758,8 +759,9 @@ static const char* const fragmentShaderSource = R"text(
         vec3 sphericalCoord = toSpherical(pos);
 
         // Scale rho/phi so particles appear at the correct scale
-        sphericalCoord.y *= 2.0;
-        sphericalCoord.z *= 4.0;
+        sphericalCoord.y *= 18.0;
+        sphericalCoord.z *= 0.4;
+        sphericalCoord.x *= 0.6;
 
         if (adiskParticle < 0.5){
             color += vec3(0.0, 1.0, 0.0) * density * 0.02;
@@ -797,7 +799,21 @@ static const char* const fragmentShaderSource = R"text(
         }
         noise = abs(noise);
 
-        vec3 dustColor = textureLod(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5), 0.0).rgb;
+        float radialT = clamp((length(pos.xz) - innerRadius) / (outerRadius - innerRadius), 0.0, 1.0);
+        
+        // accretion disk colors, based on their distance
+        vec3 innerColor = vec3(1.0, 0.85, 0.5);
+        vec3 midColor = vec3(0.9, 0.35, 0.05);
+        vec3 outerColor = vec3(0.3, 0.05, 0.02);
+
+        vec3 dustColor;
+        if (radialT < 0.3) {
+            dustColor = mix(innerColor, midColor, radialT / 0.3);
+        } else {
+            dustColor = mix(midColor, outerColor, (radialT - 0.3) / 0.7);
+        }
+
+        dustColor *= 1.0 + 4.0 * pow(1.0 - radialT, 3.0);
 
         color += density * adiskLit * dustColor * alpha * abs(noise);
     }
