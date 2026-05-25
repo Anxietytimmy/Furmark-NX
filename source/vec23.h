@@ -396,3 +396,31 @@ inline void neon_store3(float *p, float32x4_t v)
     vst1q_lane_f32(p + 1, v, 1);
     vst1q_lane_f32(p + 2, v, 2);
 }
+
+// GLSL permute
+inline float32x4_t vpermute(float32x4_t x)
+{
+    float32x4_t v34 = vdupq_n_f32(34.0f);
+    float32x4_t v1 = vdupq_n_f32(1.0f);
+    float32x4_t v289 = vdupq_n_f32(289.0f);
+    float32x4_t inv289 = vdupq_n_f32(1.0f / 289.0f);
+
+    // ((x * 34.0) + 1.0) * x
+    float32x4_t res = vmlaq_f32(v1, x, v34);
+    res = vmulq_f32(res, x);
+
+    float32x4_t quotient = vmulq_f32(res, inv289);
+
+    float32x4_t floored = vrndmq_f32(quotient); 
+    res = vmlsq_f32(res, floored, v289);
+
+    return res;
+}
+
+// GLSL taylorInvSqrt
+inline float32x4_t vtaylorInvSqrt(float32x4_t x)
+{
+    float32x4_t c1 = vdupq_n_f32(1.79284291400159f);
+    float32x4_t c2 = vdupq_n_f32(0.85373472095314f);
+    return vmlsq_f32(c1, x, c2);
+}

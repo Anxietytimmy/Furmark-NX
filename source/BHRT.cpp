@@ -500,17 +500,15 @@ static const char* const fragmentShaderSource = R"text(
 
     // checkerboard
     uniform int frameIndex;
+    uniform sampler3D noiseTex;
 
     // Phys params
-    uniform float gravitationalLensing = 1.0;
-    uniform float renderBlackHole = 1.0;
     uniform float fovScale = 1.0;
 
     // Accretion disk
-    uniform float adiskEnabled = 1.0;
     uniform float adiskParticle = 1.0;
-    uniform float adiskHeight = 0.5;
-    uniform float adiskLit = 5.0;
+    uniform float adiskHeight = 0.2;
+    uniform float adiskLit = 0.4;
     uniform float adiskDensityV = 1.0;
     uniform float adiskDensityH = 1.0;
     uniform float adiskNoiseScale = 1.0;
@@ -769,21 +767,42 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         float noise = 1.0;
+        float amp = 1.0;
+        float freq = 1.0;
+        float diskRotationSpeed = 0.2;
+        float turbulenceSpeed = 0.01;
+        float radialFlowSpeed = 0.06;
         #define NOISE_LOD 5
         for (int i = 0; i < NOISE_LOD; i++) {
-            noise *= 0.5 * snoise(sphericalCoord * float(i * i) * adiskNoiseScale) + 0.5;
-            if (i % 2 == 0) {
-                sphericalCoord.y += time * adiskSpeed;
-            } else {
-                sphericalCoord.y -= time * adiskSpeed;
-            }
-        }
+            vec3 samplePos = sphericalCoord;
 
-        vec3 dustColor = texture(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5)).rgb;
+            float r = length(pos.xz);
+            float orbitalSpeed = adiskSpeed / sqrt(max(r, 0.1));
+
+            if (i % 2 == 0)
+                samplePos.y += time * orbitalSpeed;
+            else
+                samplePos.y -= time * orbitalSpeed;
+
+
+            samplePos.x -= noise * turbulenceSpeed;
+            samplePos.z -= time * radialFlowSpeed;
+            float n = texture(noiseTex, fract(samplePos), 0.0).r;
+            n = n * 2.0 - 1.0;
+
+            noise += n * amp;
+
+            freq *= 2.0;
+            amp *= 0.5;
+        }
+        noise = abs(noise);
+
+        vec3 dustColor = textureLod(colorMap, vec2(sphericalCoord.x / outerRadius, 0.5), 0.0).rgb;
 
         color += density * adiskLit * dustColor * alpha * abs(noise);
     }
 
+    
     vec3 traceColor(vec3 pos, vec3 dir) {
         vec3 color = vec3(0.0);
         float alpha = 1.0;
@@ -800,25 +819,22 @@ static const char* const fragmentShaderSource = R"text(
             float dist = length(pos);
             float stepSize = clamp(dist * 0.04, 0.02, 0.3);
 
-            if (gravitationalLensing > 0.5) {
             // scale lensing by step size
             // Original didn't, and while it worked, dynamic changes break it
             vec3 acc = accel(h2, pos) * stepSize;
             dir += acc;
             h = cross(pos, dir);
             h2 = dot(h, h);
-            }
 
             if (dot(pos, pos) < 1.0) return color;
 
-            if (adiskEnabled > 0.5)
-                adiskColor(pos, color, alpha);
+            adiskColor(pos, color, alpha);
             
             pos += dir * stepSize;
         }
 
         dir = rotateVector(dir, vec3(0.0, 1.0, 0.0), time);
-        color += texture(galaxy, dir).rgb * alpha;
+        color += textureLod(galaxy, dir, 0.0).rgb * alpha;
         return color;
     }
 
@@ -899,7 +915,7 @@ static const char* const bloom_composite_fs = R"text(
         vec3 result = scene + bloom * bloomStrength;
 
         // Make sure that the bloom doesn't snap to white
-        result = result / (result + vec3(1.0));
+        result = vec3(1.0) - exp(-result * 1.2);
 
         fragColor = vec4(result, 1.0);
     }
@@ -973,6 +989,178 @@ static GLint  s_resolve_texelSizeLoc;
 static GLint  s_rt_frameIndexLoc;
 static int    s_frameIndex = 0;
 
+// noise texture
+static GLuint s_noiseTex3D;
+static GLint s_noiseTexLoc;
+
+// Ah fuck me the insanity starts 
+// I could just keep noise in the shader, but fuck me I want to melt shit today, so here we go
+float snoise_cpu(float v_x, float v_y, float v_z)
+{
+    pinThread(1);
+    // Constants
+    const float C_x = 1.0f / 6.0f;
+    const float C_y = 1.0f / 3.0f;
+
+    // 1st corner
+    float dot_v_Cyyy = (v_x + v_y + v_z) * C_y;
+    float i_x = std::floor(v_x + dot_v_Cyyy);
+    float i_y = std::floor(v_y + dot_v_Cyyy);
+    float i_z = std::floor(v_z + dot_v_Cyyy);
+
+    float dot_i_Cxxx = (i_x + i_y + i_z) * C_x;
+    float x0_x = v_x - i_x + dot_i_Cxxx;
+    float x0_y = v_y - i_y + dot_i_Cxxx;
+    float x0_z = v_z - i_z + dot_i_Cxxx;
+
+    // Other corners
+    float g_x = (x0_y >= x0_x) ? 1.0f : 0.0f;
+    float g_y = (x0_z >= x0_y) ? 1.0f : 0.0f;
+    float g_z = (x0_x >= x0_z) ? 1.0f : 0.0f;
+
+    float l_x = 1.0f - g_x;
+    float l_y = 1.0f - g_y;
+    float l_z = 1.0f - g_z;
+
+    float i1_x = std::min(g_x, l_z);
+    float i1_y = std::min(g_y, l_x);
+    float i1_z = std::min(g_z, l_y);
+
+    float i2_x = std::max(g_x, l_z);
+    float i2_y = std::max(g_y, l_x);
+    float i2_z = std::max(g_z, l_y);
+
+    // Vectorize across the 4 corners: [corner0, corner1, corner2, corner3]
+    float32x4_t i1 = {0.0f, i1_x, i2_x, 1.0f};
+    float32x4_t i2 = {0.0f, i1_y, i2_y, 1.0f};
+    float32x4_t i3 = {0.0f, i1_z, i2_z, 1.0f};
+
+    // Constant vectors
+    float32x4_t vC_xxx = vdupq_n_f32(C_x);
+    float32x4_t v_zero = vdupq_n_f32(0.0f);
+    float32x4_t v_one  = vdupq_n_f32(1.0f);
+
+    // x1, x2, x3 offsets
+    float32x4_t c_mult = {0.0f, 1.0f, 2.0f, 3.0f};
+    float32x4_t c_offset = vmulq_f32(c_mult, vC_xxx);
+
+    // Positions relative to all 4 corners (Transposed Layout)
+    float32x4_t dx = vsubq_f32(vdupq_n_f32(x0_x), i1);
+    float32x4_t dy = vsubq_f32(vdupq_n_f32(x0_y), i2);
+    float32x4_t dz = vsubq_f32(vdupq_n_f32(x0_z), i3);
+
+    dx = vaddq_f32(dx, c_offset);
+    dy = vaddq_f32(dy, c_offset);
+    dz = vaddq_f32(dz, c_offset);
+
+    // Permutations
+    // mod(i, 289.0)
+    float i_mod_x = i_x - std::floor(i_x * (1.0f / 289.0f)) * 289.0f;
+    float i_mod_y = i_y - std::floor(i_y * (1.0f / 289.0f)) * 289.0f;
+    float i_mod_z = i_z - std::floor(i_z * (1.0f / 289.0f)) * 289.0f;
+
+    float32x4_t p_z = vaddq_f32(vdupq_n_f32(i_mod_z), i3);
+    float32x4_t p_y = vaddq_f32(vdupq_n_f32(i_mod_y), i2);
+    float32x4_t p_x = vaddq_f32(vdupq_n_f32(i_mod_x), i1);
+
+    float32x4_t p = vpermute(vaddq_f32(vpermute(vaddq_f32(vpermute(p_z), p_y)), p_x));
+
+    // Gradients
+    float ns_z = 1.0f / 7.0f;
+    float ns_x = ns_z * 2.0f;
+    float32x4_t vns_z = vdupq_n_f32(ns_z);
+    float32x4_t vns_x = vdupq_n_f32(ns_x);
+
+    // j = p - 49.0 * floor(p * ns.z * ns.z)
+    float32x4_t j_floor = vrndmq_f32(vmulq_f32(p, vdupq_n_f32(ns_z * ns_z)));
+    float32x4_t j = vmlsq_f32(p, j_floor, vdupq_n_f32(49.0f));
+
+    float32x4_t x_ = vrndmq_f32(vmulq_f32(j, vns_z));
+    float32x4_t y_ = vrndmq_f32(vmlsq_f32(j, x_, vdupq_n_f32(7.0f)));
+
+    float32x4_t gx = vmlaq_f32(vdupq_n_f32(-1.0f), x_, vns_x);
+    float32x4_t gy = vmlaq_f32(vdupq_n_f32(-1.0f), y_, vns_x);
+    
+    // h = 1.0 - abs(x) - abs(y)
+    float32x4_t h = vsubq_f32(vsubq_f32(v_one, vabsq_f32(gx)), vabsq_f32(gy));
+
+    // s = floor(b) * 2.0 + 1.0
+    float32x4_t b0_floor = vrndmq_f32(gx);
+    float32x4_t b1_floor = vrndmq_f32(gy);
+    float32x4_t s0 = vmlaq_f32(v_one, b0_floor, vdupq_n_f32(2.0f));
+    float32x4_t s1 = vmlaq_f32(v_one, b1_floor, vdupq_n_f32(2.0f));
+
+    // sh = -step(h, 0.0) -> if h < 0.0 then -1.0 else 0.0
+    // vccltq_f32 yields mask (0xFFFFFFFF if true, 0 if false)
+    uint32x4_t h_lt_zero = vcltq_f32(h, v_zero);
+    float32x4_t sh = vbslq_f32(h_lt_zero, vdupq_n_f32(-1.0f), v_zero);
+
+    // a = b + s * sh
+    float32x4_t ax = vmlaq_f32(gx, s0, sh);
+    float32x4_t ay = vmlaq_f32(gy, s1, sh);
+
+    // Gradients p0, p1, p2, p3 now sit sequentially in ax, ay, h registers
+    // Normalize gradients: taylorInvSqrt(dot(p, p))
+    float32x4_t dot_p = vmulq_f32(ax, ax);
+    dot_p = vmlaq_f32(dot_p, ay, ay);
+    dot_p = vmlaq_f32(dot_p, h, h);
+
+    float32x4_t norm = vtaylorInvSqrt(dot_p);
+    ax = vmulq_f32(ax, norm);
+    ay = vmulq_f32(ay, norm);
+    h  = vmulq_f32(h, norm);
+
+    // Mix final noise val
+    // m = max(0.6 - dot(dx, dx)... , 0.0)
+    float32x4_t dot_dx = vmulq_f32(dx, dx);
+    dot_dx = vmlaq_f32(dot_dx, dy, dy);
+    dot_dx = vmlaq_f32(dot_dx, dz, dz);
+
+    float32x4_t m = vmaxq_f32(vsubq_f32(vdupq_n_f32(0.6f), dot_dx), v_zero);
+    m = vmulq_f32(m, m); // m^2
+    float32x4_t m4 = vmulq_f32(m, m); // m^4
+
+    // dot(p, dx)
+    float32x4_t dot_p_dx = vmulq_f32(ax, dx);
+    dot_p_dx = vmlaq_f32(dot_p_dx, ay, dy);
+    dot_p_dx = vmlaq_f32(dot_p_dx, h, dz);
+
+    // Final combination: 42.0 * dot(m^4, dot_p_dx)
+    float32x4_t final_vec = vmulq_f32(m4, dot_p_dx);
+    
+    // Horizontal addition of the 4 lanes
+    float final_sum = vaddvq_f32(final_vec); 
+
+    return 42.0f * final_sum;
+}
+
+// Make a 64^3 texture for the accretion disk
+static void buildNoise3()
+{
+    const int N = 64;
+    std::vector<uint8_t> data(N * N * N);
+    for (int z = 0; z < N; z++)
+    for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+        float fx = float(x) / float(N);
+        float fy = float(y) / float(N);
+        float fz = float(z) / float(N);
+
+        float v = snoise_cpu(fx * 8.0f, fy * 8.0f, fz * 8.0f);
+        data[z * N * N + y * N + x] = (uint8_t)((v * 0.5f + 0.5f) * 255.0f);
+    }
+
+    glGenTextures(1, &s_noiseTex3D);
+    glBindTexture(GL_TEXTURE_3D, s_noiseTex3D);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, N, N, N, 0, GL_RED, GL_UNSIGNED_BYTE, data.data());
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+
+}
+
 // Create bloom textures
 static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
 {
@@ -1005,6 +1193,8 @@ void BHRTSceneInit()
     GLuint tex2loc = glGetUniformLocation(s_program, "colorMap");
     loc_time = glGetUniformLocation(s_program, "time");
     resloc = glGetUniformLocation(s_program, "res");
+    s_noiseTexLoc = glGetUniformLocation(s_program, "noiseTex");
+    buildNoise3();
 
     // Can you tell most of this is a rehash of old bullshit
     GLint success;
@@ -1200,6 +1390,7 @@ float getTime5()
 // Compute camera positions on the CPU instead of GPU
 static void computeCamera_NEON(float t, float* outCamPos, float* outView)
 {
+    pinThread(0);
 
     float s = sinf(t * 0.1f);
     float c = cosf(t * 0.1f);
@@ -1260,6 +1451,9 @@ void BHRTRender()
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
     glActiveTexture(GL_TEXTURE1); 
     glBindTexture(GL_TEXTURE_2D, tex2);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_3D, s_noiseTex3D);
+    glUniform1i(s_noiseTexLoc, 2);
     glUniform1f(loc_time, getTime5());
     glUniform2f(resloc, 1280.0f, 720.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
