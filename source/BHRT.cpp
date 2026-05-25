@@ -765,8 +765,9 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         float noise = 1.0;
-        for (int i = 0; i < int(adiskNoiseLOD); i++) {
-            noise *= 0.5 * snoise(sphericalCoord * pow(i, 2) * adiskNoiseScale) + 0.5;
+        #define NOISE_LOD 5
+        for (int i = 0; i < NOISE_LOD; i++) {
+            noise *= 0.5 * snoise(sphericalCoord * float(i * i) * adiskNoiseScale) + 0.5;
             if (i % 2 == 0) {
                 sphericalCoord.y += time * adiskSpeed;
             } else {
@@ -783,45 +784,35 @@ static const char* const fragmentShaderSource = R"text(
         vec3 color = vec3(0.0);
         float alpha = 1.0;
 
-        float STEP_SIZE = 0.1;
-        dir *= STEP_SIZE;
+        dir = normalize(dir);
 
         //Initial val
         vec3 h = cross(pos, dir);
         float h2 = dot(h, h);
 
+        // Ray iterations count
         for (int i = 0; i < 250; i++) {
-            if (renderBlackHole > 0.5) {
-                // Apply lensing
-                if (gravitationalLensing > 0.5) {
-                    vec3 acc = accel(h2, pos);
-                    dir += acc;
-                }
+            // Dynamically change steps taken based on distance from the black hole
+            float dist = length(pos);
+            float stepSize = clamp(dist * 0.04, 0.02, 0.3);
 
-                // Event horizon
-                if (dot(pos, pos) < 1.0) {
-                    return color;
-                }
-
-                float minDistance = INFINITY;
-
-                if (false) {
-                    Ring ring;
-                    ring.center = vec3(0.0, 0.05, 0.0);
-                    ring.normal = vec3(0.0, 1.0, 0.0);
-                    ring.innerRadius = 2.0;
-                    ring.outerRadius = 6.0;
-                    ringColor(pos, dir, ring, minDistance, color);
-                } else {
-                    if (adiskEnabled > 0.5) {
-                        adiskColor(pos, color, alpha);
-                    }
-                }
-
+            if (gravitationalLensing > 0.5) {
+            // scale lensing by step size
+            // Original didn't, and while it worked, dynamic changes break it
+            vec3 acc = accel(h2, pos) * stepSize;
+            dir += acc;
+            h = cross(pos, dir);
+            h2 = dot(h, h);
             }
-            pos += dir;
+
+            if (dot(pos, pos) < 1.0) return color;
+
+            if (adiskEnabled > 0.5)
+                adiskColor(pos, color, alpha);
+            
+            pos += dir * stepSize;
         }
-        // Sample skybox color
+
         dir = rotateVector(dir, vec3(0.0, 1.0, 0.0), time);
         color += texture(galaxy, dir).rgb * alpha;
         return color;
@@ -951,7 +942,7 @@ static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
 {
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
