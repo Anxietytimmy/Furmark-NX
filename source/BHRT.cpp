@@ -505,8 +505,8 @@ static const char* const fragmentShaderSource = R"text(
     // Accretion disk
     uniform float adiskEnabled = 1.0;
     uniform float adiskParticle = 1.0;
-    uniform float adiskHeight = 0.2;
-    uniform float adiskLit = 0.5;
+    uniform float adiskHeight = 0.5;
+    uniform float adiskLit = 5.0;
     uniform float adiskDensityV = 1.0;
     uniform float adiskDensityH = 1.0;
     uniform float adiskNoiseScale = 1.0;
@@ -749,7 +749,7 @@ static const char* const fragmentShaderSource = R"text(
         density *= smoothstep(innerRadius, innerRadius * 1.1, length(pos));
 
         // Dont compute if the density is tiny
-        if (density < 0.005) {
+        if (density < 0.003) {
             return;
         }
 
@@ -999,7 +999,7 @@ void BHRTSceneInit()
     glEnableVertexAttribArray(0);
 
     int width, height, nchan;
-    stbi_set_flip_vertically_on_load(false);
+    stbi_set_flip_vertically_on_load(true);
 
     // Make a dummy cube map for testing
     glGenTextures(1, &tex1);
@@ -1097,7 +1097,8 @@ void BHRTSceneInit()
     // Cache locations
     glUseProgram(s_bloomExtractProg);
     glUniform1i(glGetUniformLocation(s_bloomExtractProg, "sceneTex"), 0);
-    glUniform1f(glGetUniformLocation(s_bloomExtractProg, "threshold"), 0.6f);
+    // Cutoff for brightness
+    glUniform1f(glGetUniformLocation(s_bloomExtractProg, "threshold"), 0.7f);
 
     glUseProgram(s_bloomBlurProg);
     glUniform1i(glGetUniformLocation(s_bloomBlurProg, "blurTex"), 0);
@@ -1109,7 +1110,8 @@ void BHRTSceneInit()
     glUniform1i(glGetUniformLocation(s_bloomCompositeProg, "sceneTex"), 0);
     glUniform1i(glGetUniformLocation(s_bloomCompositeProg, "bloomTex"), 1);
     s_composite_bloomStrengthLoc = glGetUniformLocation(s_bloomCompositeProg, "bloomStrength");
-    glUniform1f(s_composite_bloomStrengthLoc, 1.4f);
+    // global intensity
+    glUniform1f(s_composite_bloomStrengthLoc, 2.4f);
 
     glUseProgram(s_program);
 
@@ -1158,7 +1160,7 @@ void BHRTRender()
 
     // Actual blur, setup iterations
     glUseProgram(s_bloomBlurProg);
-    const int BLUR_ITERATIONS = 3;
+    const int BLUR_ITERATIONS = 8;
     for (int i = 0; i < BLUR_ITERATIONS; i++) {
         // A -> B Horizontal
         glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboB);
