@@ -739,7 +739,7 @@ static const char* const fragmentShaderSource = R"text(
         float outerRadius = 12.0;
 
         //Accertion disks increase in density the closer we get to the event horizon
-        float thinDiskHeight = 0.02;
+        float thinDiskHeight = 0.18;
         float density = max(0.0, 1.0 - length(pos.xyz / vec3(outerRadius, thinDiskHeight, outerRadius)));
         if (density < 0.001) {
             return;
@@ -747,7 +747,7 @@ static const char* const fragmentShaderSource = R"text(
 
 
         // Set particles to 0 once we go past the innermost circular orbit
-        density *= pow(1.0 - abs(pos.y) / thinDiskHeight, 16.0);
+        density *= pow(1.0 - abs(pos.y) / thinDiskHeight, 6.0);
         density *= smoothstep(innerRadius, innerRadius + 0.4, length(pos.xz));
 
         // Dont compute if the density is tiny
@@ -771,21 +771,37 @@ static const char* const fragmentShaderSource = R"text(
         rotatedPos.x = pos.x * cosA - pos.z * sinA;
         rotatedPos.z = pos.x * sinA + pos.z * cosA;
 
-        float noise = 1.0;
-        float amp = 1.0;
-        
         // Noise texture parameters
+        // noise size, higher = finer grain
+        float noise = 0.0;
+        float amp = 1.0;
+        float scale = 0.35;
+        float totalAmp = 0.0;
+
+        // Stretch factors across respective axis
+        float stretchX = 1.0;
+        float stretchY = 2.0;
+        float stretchZ = 0.2;
+
+        // Frequency mul per octave, higher = finer detail
+        float lacunarity = 1.8;
+        // Brightness drop per octave, higher = sharper micro grain
+        float gain = 0.45;
+
         #define NOISE_LOD 4
         for (int i = 0; i < NOISE_LOD; i++) {
             // Use positions along flow direction to map correctly
-            vec3 sampleCoords = vec3(rotatedPos.x * 0.4, rotatedPos.y * 4.0, rotatedPos.z * 0.05);
+            vec3 sampleCoords = vec3(rotatedPos.x * stretchX, rotatedPos.y * stretchY, rotatedPos.z * stretchZ);
             
-            float n = textureLod(noiseTex, sampleCoords * (1.0 + float(i) * 0.5), 0.0).r * 2.0 - 1.0;
+            float n = textureLod(noiseTex, sampleCoords, 0.0).r * 2.0 - 1.0;
             noise += n * amp;
-            amp *= 0.5;
+            totalAmp += amp;
+            scale *= lacunarity;
+            amp *= gain;
         }
         #undef NOISE_LOD
-        noise = max(0.0, abs(noise));
+        // Normalize to [0,1]
+        noise = clamp(noise / totalAmp * 0.5 + 0.5, 0.0, 1.0);
 
         // Add dopler shifiting
         // Basically, in a black hole the accretion disk is spinning so rapidly that it significantly changes light
@@ -832,7 +848,7 @@ static const char* const fragmentShaderSource = R"text(
 
         // Scale colors and attenuate alpha for volumetric depth
         // Controls disk opacity
-        float absorption = 2.5;
+        float absorption = 1.2;
         float sampleAlpha = clamp(density * noise * stepSize * absorption * beaming, 0.0, 1.0);
 
         color += dustColor * adiskLit * sampleAlpha * alpha * beaming;
@@ -841,6 +857,9 @@ static const char* const fragmentShaderSource = R"text(
         alpha *= (1.0 - sampleAlpha);
     }
 
+    float hash2d(vec2 co) {
+        return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+    }
     
     vec3 traceColor(vec3 pos, vec3 dir) {
         vec3 color = vec3(0.0);
@@ -851,6 +870,11 @@ static const char* const fragmentShaderSource = R"text(
         //Initial val
         vec3 h = cross(pos, dir);
         float h2 = dot(h, h);
+
+        // Dithering
+        float dither = hash2d(vec2(gl_FragCoord.xy)); 
+        float initialStep = clamp(length(pos) * 0.04, 0.02, 0.3);
+        pos += dir * (initialStep * dither);
 
         // Ray iterations count
         for (int i = 0; i < 250; i++) {
