@@ -508,13 +508,13 @@ static const char* const fragmentShaderSource = R"text(
 
     // Accretion disk
     uniform float adiskParticle = 1.0;
-    uniform float adiskHeight = 0.12;
+    uniform float adiskHeight = 0.1;
     uniform float adiskLit = 0.5;
     uniform float adiskDensityV = 2.0;
     uniform float adiskDensityH = 1.5;
-    uniform float adiskNoiseScale = 0.7;
+    uniform float adiskNoiseScale = 0.4;
     uniform float adiskNoiseLOD = 5.0;
-    uniform float adiskSpeed = 0.5;
+    uniform float adiskSpeed = 0.12;
 
     struct Ring {
         vec3 center;
@@ -771,25 +771,24 @@ static const char* const fragmentShaderSource = R"text(
         float noise = 1.0;
         float amp = 1.0;
         float freq = 1.0;
-        float diskRotationSpeed = 0.2;
-        float turbulenceSpeed = 0.01;
-        float radialFlowSpeed = 0.06;
         #define NOISE_LOD 5
         for (int i = 0; i < NOISE_LOD; i++) {
-            vec3 samplePos = sphericalCoord;
-
             float r = length(pos.xz);
-            float orbitalSpeed = adiskSpeed / sqrt(max(r, 0.1));
+            float theta = atan(pos.z, pos.x);
+            float orbitalSpeed = 2.0 / pow(max(r, 0.2), 1.5);
 
-            if (i % 2 == 0)
-                samplePos.y += time * orbitalSpeed;
-            else
-                samplePos.y -= time * orbitalSpeed;
+            float turbulence = texture(noiseTex, pos * 0.08).r;
+            theta += turbulence * 0.4;
 
+            vec3 flowCoord = vec3(theta * 2.5, pos.y * 1.5, log(r + 1.0) * 2.0);
 
-            samplePos.x -= noise * turbulenceSpeed;
-            samplePos.z -= time * radialFlowSpeed;
-            float n = texture(noiseTex, fract(samplePos), 0.0).r;
+            flowCoord.x += time * orbitalSpeed;
+
+            vec3 warp = texture(noiseTex, flowCoord * 0.15).rgb;
+            warp = warp * 2.0 - 1.0;
+            flowCoord += warp * 0.25;
+
+            float n = texture(noiseTex, fract(flowCoord)).r;
             n = n * 2.0 - 1.0;
 
             noise += n * amp;
