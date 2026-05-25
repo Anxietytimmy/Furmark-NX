@@ -735,7 +735,7 @@ static const char* const fragmentShaderSource = R"text(
     // Accretion Disc
     // for laughs, I tried running this bullshit on my PC with a 5060, at 1080p this thing was dying
     // I am terrified at how its going to run on NX
-    void adiskColor(vec3 pos, inout vec3 color, inout float alpha) {
+    void adiskColor(vec3 pos, inout vec3 color, inout float alpha, float stepSize) {
         float innerRadius = 2.6;
         float outerRadius = 12.0;
 
@@ -748,8 +748,8 @@ static const char* const fragmentShaderSource = R"text(
         density *= pow(1.0 - abs(pos.y) / adiskHeight, adiskDensityV * 4.0);
 
         // Set particles to 0 once we go past the innermost circular orbit
-
-        density *= smoothstep(outerRadius, outerRadius * 0.85, length(pos));
+        // Also fade much more smoothly than before
+        density *= smoothstep(innerRadius, innerRadius + 0.5, length(pos.xz));
 
         // Dont compute if the density is tiny
         if (density < 0.003) {
@@ -796,6 +796,7 @@ static const char* const fragmentShaderSource = R"text(
             freq *= 2.0;
             amp *= 0.5;
         }
+        #undef NOISE_LOD
         noise = abs(noise);
 
         float radialT = clamp((length(pos.xz) - innerRadius) / (outerRadius - innerRadius), 0.0, 1.0);
@@ -814,7 +815,15 @@ static const char* const fragmentShaderSource = R"text(
 
         dustColor *= 1.0 + 4.0 * pow(1.0 - radialT, 3.0);
 
-        color += density * adiskLit * dustColor * alpha * abs(noise);
+        // Scale colors and attenuate alpha for volumetric depth
+        // Controls disk opacity
+        float absorption = 1.5;
+        float sampleAlpha = clamp(density * noise * stepSize * absorption, 0.0, 1.0);
+
+        color += dustColor * adiskLit * sampleAlpha * alpha;
+
+        // Attenuate alpha for realistic occlusion
+        alpha *= (1.0 - sampleAlpha);
     }
 
     
@@ -843,7 +852,8 @@ static const char* const fragmentShaderSource = R"text(
 
             if (dot(pos, pos) < 1.0) return color;
 
-            adiskColor(pos, color, alpha);
+            // pass dynamic step sizes
+            adiskColor(pos, color, alpha, stepSize);
             
             pos += dir * stepSize;
         }
