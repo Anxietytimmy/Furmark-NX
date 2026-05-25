@@ -349,3 +349,50 @@ inline vec3x4 cosineSampleHemisphere4(const vec3x4& n, uint32x4_t& rng){
     d.z = vaddq_f32(vaddq_f32(vmulq_f32(lx, t.z), vmulq_f32(ly, b.z)), vmulq_f32(lz, n.z));
     return d;
 }
+
+// hello again
+// its ya boy
+// sleep paralyisis
+// ---------------------------
+// Black hole bullshit
+// ---------------------------
+
+// These are mainly for camera position computes, but they are useful outside of the black hole test.
+// that Plus 4k lines is already good enough thank you
+
+// dot producut, but ignores W
+inline float neon_dot3(float32x4_t a, float32x4_t b)
+{
+    float32x4_t mul = vmulq_f32(a, b);
+    float32x2_t lo = vget_low_f32(mul);
+    float32x2_t hi = vget_high_f32(mul);
+    float32x2_t sum = vpadd_f32(lo, lo);
+    return vget_lane_f32(vadd_f32(sum, hi), 0);
+}
+
+// 3 component cross product
+inline float32x4_t neon_cross3(float32x4_t a, float32x4_t b) {
+    float32x4_t a_yzx = __builtin_shufflevector(a, a, 1, 2, 0, 3);
+    float32x4_t a_zxy = __builtin_shufflevector(a, a, 2, 0, 1, 3);
+    float32x4_t b_yzx = __builtin_shufflevector(b, b, 1, 2, 0 ,3);
+    float32x4_t b_zxy = __builtin_shufflevector(b, b, 2, 0, 1, 3);
+    return vsubq_f32(vmulq_f32(a_yzx, b_zxy), vmulq_f32(a_zxy, b_yzx));
+}
+
+// Normalize once
+// Use newton's method for this
+inline float32x4_t neon_normalize3(float32x4_t v)
+{
+    float32x2_t lenSq = vdup_n_f32(neon_dot3(v, v));
+    float32x2_t est = vrsqrte_f32(lenSq);
+    est = vmul_f32(est, vrsqrts_f32(vmul_f32(lenSq, est), est));
+    return vmulq_f32(v, vcombine_f32(est, est));
+}
+
+// Store into float[3]
+inline void neon_store3(float *p, float32x4_t v) 
+{
+    vst1q_lane_f32(p + 0, v, 0);
+    vst1q_lane_f32(p + 1, v, 1);
+    vst1q_lane_f32(p + 2, v, 2);
+}

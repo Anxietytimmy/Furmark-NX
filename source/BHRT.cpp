@@ -12,6 +12,7 @@
 #include <arm_neon.h>
 #include <cstdlib>
 #include <map>
+#include <math.h>
 
 #define GLM_FORCE_PURE
 #include <glm/vec3.hpp>
@@ -819,30 +820,14 @@ static const char* const fragmentShaderSource = R"text(
     }
 
     // COUGH COUGH WHAT THE FUCK AHH
+    uniform vec3 camPos;
+    uniform mat3 view;
 
     void main() {
-        mat3 view;
-        vec3 cameraPos;
-
-        if (frontView > 0.5) {
-            cameraPos = vec3(10.0, 1.0, 10.0);
-        }   else if (topView > 0.5) {
-            cameraPos = vec3(15.0, 15.0, 0);
-        }   else {
-            cameraPos = vec3(-cos(time * 0.1) * 15.0, sin(time * 0.1) * 15.0, sin(time * 0.1) * 15.0);
-        }
-
-        vec3 target = vec3(0.0, 0.0, 0.0);
-        view = lookAt(cameraPos, target, radians(cameraRoll));
-
-        vec2 uv = gl_FragCoord.xy / res.xy - vec2(0.5);
+        vec2 uv = gl_FragCoord.xy / res - vec2(0.5);
         uv.x *= res.x / res.y;
-
-        vec3 dir = normalize(vec3(-uv.x * fovScale, uv.y * fovScale, 1.0));
-        vec3 pos = cameraPos;
-        dir = view * dir;
-
-        fragColor = vec4(traceColor(pos, dir), 1.0);
+        vec3 dir = view * normalize(vec3(-uv.x * fovScale, uv.y * fovScale, 1.0));
+        fragColor = vec4(traceColor(camPos, dir), 1.0);
     }
 )text";
 
@@ -916,6 +901,9 @@ static GLint res;
 static GLuint tex1;
 static GLuint tex2;
 static GLint resloc;
+
+static GLint loc_camPos;
+static GLint loc_view;
 
 // I find you facinating
 static GLuint s_bloomExtractProg;
@@ -1021,6 +1009,10 @@ void BHRTSceneInit()
 
     glUseProgram(s_program);
 
+    loc_camPos = glGetUniformLocation(s_program, "camPos");
+    loc_view   = glGetUniformLocation(s_program, "view");
+
+
     glUniform1i(tex2loc, 1);
 
 
@@ -1107,11 +1099,41 @@ void BHRTSceneInit()
     glUseProgram(s_program);
 
 }
+
 float getTime5()
     {
         u64 elapsed = armGetSystemTick() - s_startTicks;
         return (elapsed * 625 / 12) / 2000000000.0;
     }
+
+// Compute camera positions on the CPU instead of GPU
+static void computeCamera_NEON(float t, float* outCamPos, float* outView)
+{
+
+    float s = sinf(t * 0.1f);
+    float c = cosf(t * 0.1f);
+
+    // camPos = -cos*15, sin*15, 0
+    float32x4_t eye = { -c * 15.f, s * 15.f, s * 15.f, 0.f};
+    float32x4_t target = vdupq_n_f32(0.f);
+    float32x4_t worldUp = { 0.f, 1.f, 0.f, 0.f};
+
+    // lookat
+    float32x4_t fwd = neon_normalize3(vsubq_f32(target, eye));
+    float32x4_t right = neon_normalize3(neon_cross3(fwd, worldUp));
+    float32x4_t newUp = neon_cross3(right, fwd);
+
+    // Write camPos
+    neon_store3(outCamPos, eye);
+
+    // assemble mat3
+    // Where lookat col0 -> right, col1 -> newUp, col2 -> -forward
+    float32x4_t neg_fwd = vnegq_f32(fwd);
+    neon_store3(outView + 0, right);
+    neon_store3(outView + 3, newUp);
+    neon_store3(outView + 6, fwd);
+}
+
 void BHRTRender()
 {
     // FPS calculation
@@ -1128,11 +1150,19 @@ void BHRTRender()
 
     glBindVertexArray(s_vao);
 
+    // Compute camera positions on CPU
+    float camPos[3];
+    float view[9];
+    computeCamera_NEON(getTime5(), camPos, view);
+
+
     // RT + Scene
     glBindFramebuffer(GL_FRAMEBUFFER, s_sceneFbo);
     glViewport(0, 0, 1280, 720);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(s_program);
+    glUniform3fv(loc_camPos, 1, camPos);
+    glUniformMatrix3fv(loc_view, 1, GL_FALSE, view);
     glActiveTexture(GL_TEXTURE0); 
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
     glActiveTexture(GL_TEXTURE1); 
