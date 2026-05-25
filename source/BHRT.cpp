@@ -756,26 +756,31 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         float r = length(pos.xz);
+
+        // hell
+        float theta = atan(pos.z, pos.x);
+        float orbitalSpeed = 2.5 / pow(max(r, 0.2), 1.5);
+
+        // Comp a dynamic rotation angle for noise
+        float rotAngle = theta + time * orbitalSpeed;
+        float cosA = cos(rotAngle);
+        float sinA = sin(rotAngle);
+
+        // Rotate the actual local XZ space smoothly over time
+        vec3 rotatedPos = pos;
+        rotatedPos.x = pos.x * cosA - pos.z * sinA;
+        rotatedPos.z = pos.x * sinA + pos.z * cosA;
+
         float noise = 1.0;
         float amp = 1.0;
         
         // Noise texture parameters
-        #define NOISE_LOD 5
+        #define NOISE_LOD 4
         for (int i = 0; i < NOISE_LOD; i++) {
-            float theta = atan(pos.z, pos.x);
-            float orbitalSpeed = 2.5 / pow(max(r, 0.2), 1.5);
-
-            float turbulence = texture(noiseTex, pos * 0.1).r;
-            theta += turbulence * 0.5;
-
-            // Compress the shit out of r to stretch noise into circles
-            vec3 flowCoord = vec3(theta * 4.0, pos.y * 5.0, log(r + 1.0) * 25.0);
-            flowCoord.x += time * orbitalSpeed;
-
-            vec3 warp = texture(noiseTex, flowCoord * 0.1).rgb * 2.0 - 1.0;
-            flowCoord += warp * 0.3;
-
-            float n = texture(noiseTex, fract(flowCoord)).r * 2.0 - 1.0;
+            // Use positions along flow direction to map correctly
+            vec3 sampleCoords = vec3(rotatedPos.x * 0.4, rotatedPos.y * 4.0, rotatedPos.z * 0.05);
+            
+            float n = textureLod(noiseTex, sampleCoords * (1.0 + float(i) * 0.5), 0.0).r * 2.0 - 1.0;
             noise += n * amp;
             amp *= 0.5;
         }
@@ -808,9 +813,9 @@ static const char* const fragmentShaderSource = R"text(
         // To other planes
         // accretion disk colors, based on their distance
         // Apply whitening with blue shift
-        vec3 innerColor = vec3(1.0, 0.85, 0.5) * pow(doppler, 1.5);
-        vec3 midColor = vec3(0.9, 0.35, 0.05);
-        vec3 outerColor = vec3(0.3, 0.05, 0.02);
+        vec3 innerColor = vec3(1.3, 1.1, 0.9) * pow(doppler, 1.5);
+        vec3 midColor = vec3(1.0, 0.4, 0.05);
+        vec3 outerColor = vec3(0.4, 0.02, 0.0);
 
         // Stay with me
         // Come sail with me
@@ -1181,7 +1186,7 @@ static void buildNoise3()
         float fy = float(y) / float(N);
         float fz = float(z) / float(N);
 
-        float v = snoise_cpu(fx * 8.0f, fy * 8.0f, fz * 8.0f);
+        float v = snoise_cpu(fx * 16.0f, fy * 16.0f, fz * 16.0f);
         data[z * N * N + y * N + x] = (uint8_t)((v * 0.5f + 0.5f) * 255.0f);
     }
 
