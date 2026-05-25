@@ -498,6 +498,9 @@ static const char* const fragmentShaderSource = R"text(
     uniform float topView = 0.0;
     uniform float cameraRoll = 0.0;
 
+    // checkerboard
+    uniform int frameIndex;
+
     // Phys params
     uniform float gravitationalLensing = 1.0;
     uniform float renderBlackHole = 1.0;
@@ -824,6 +827,12 @@ static const char* const fragmentShaderSource = R"text(
     uniform mat3 view;
 
     void main() {
+        ivec2 coord = ivec2(gl_FragCoord.xy);
+        // Checkerboard rendering, ie skip pixels if they belong to another frame
+        if ((coord.x + coord.y + frameIndex) % 2 != 0) {
+            discard;
+        }
+
         vec2 uv = gl_FragCoord.xy / res - vec2(0.5);
         uv.x *= res.x / res.y;
         vec3 dir = view * normalize(vec3(-uv.x * fovScale, uv.y * fovScale, 1.0));
@@ -834,66 +843,95 @@ static const char* const fragmentShaderSource = R"text(
 // Bloom shaders
 // Extracts bright areas and downsamples to .25x res
 static const char* const bloom_extract_fs = R"text(
-#version 330 core
-in vec2 uv;
-out vec4 fragColor;
-uniform sampler2D sceneTex;
-uniform float threshold;
+    #version 330 core
+    in vec2 uv;
+    out vec4 fragColor;
+    uniform sampler2D sceneTex;
+    uniform float threshold;
 
-void main() {
-    vec3 color = texture(sceneTex, uv).rgb;
-    // Luminance val
-    float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    // Softer fall off instead of hard edges
-    float contrib = smoothstep(threshold, threshold + 0.3, brightness);
-    fragColor = vec4(color * contrib, 1.0);
-}
+    void main() {
+        vec3 color = texture(sceneTex, uv).rgb;
+        // Luminance val
+        float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        // Softer fall off instead of hard edges
+        float contrib = smoothstep(threshold, threshold + 0.3, brightness);
+        fragColor = vec4(color * contrib, 1.0);
+    }
 )text";
 
 // Gaussian blur, runs once on X/Y
 static const char* const bloom_blur_fs = R"text(
-#version 330 core
-in vec2 uv;
-out vec4 fragColor;
-uniform sampler2D blurTex;
-uniform vec2 direction;   // (1,0) or (0,1)
-uniform vec2 texelSize;   // 1.0 / vec2(BLOOM_W, BLOOM_H)
+    #version 330 core
+    in vec2 uv;
+    out vec4 fragColor;
+    uniform sampler2D blurTex;
+    uniform vec2 direction;   // (1,0) or (0,1)
+    uniform vec2 texelSize;   // 1.0 / vec2(BLOOM_W, BLOOM_H)
 
-// 9-tap Gaussian weights
-const float weight[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
+    // 9-tap Gaussian weights
+    const float weight[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
 
-void main() {
-    vec3 result = texture(blurTex, uv).rgb * weight[0];
-    vec2 step = direction * texelSize;
-    for (int i = 1; i < 5; i++) {
-        result += texture(blurTex, uv + step * float(i)).rgb * weight[i];
-        result += texture(blurTex, uv - step * float(i)).rgb * weight[i];
+    void main() {
+        vec3 result = texture(blurTex, uv).rgb * weight[0];
+        vec2 step = direction * texelSize;
+        for (int i = 1; i < 5; i++) {
+            result += texture(blurTex, uv + step * float(i)).rgb * weight[i];
+            result += texture(blurTex, uv - step * float(i)).rgb * weight[i];
+        }
+        fragColor = vec4(result, 1.0);
     }
-    fragColor = vec4(result, 1.0);
-}
 )text";
 
 // Adds blur on top of the final scene
 static const char* const bloom_composite_fs = R"text(
-#version 330 core
-in vec2 uv;
-out vec4 fragColor;
-uniform sampler2D sceneTex;
-uniform sampler2D bloomTex;
-uniform float bloomStrength;
+    #version 330 core
+    in vec2 uv;
+    out vec4 fragColor;
+    uniform sampler2D sceneTex;
+    uniform sampler2D bloomTex;
+    uniform float bloomStrength;
 
-void main() {
-    vec3 scene = texture(sceneTex, uv).rgb;
-    vec3 bloom  = texture(bloomTex, uv).rgb;
+    void main() {
+        vec3 scene = texture(sceneTex, uv).rgb;
+        vec3 bloom  = texture(bloomTex, uv).rgb;
 
-    //Make sure that bloom never darkens
-    vec3 result = scene + bloom * bloomStrength;
+        //Make sure that bloom never darkens
+        vec3 result = scene + bloom * bloomStrength;
 
-    // Make sure that the bloom doesn't snap to white
-    result = result / (result + vec3(1.0));
+        // Make sure that the bloom doesn't snap to white
+        result = result / (result + vec3(1.0));
 
-    fragColor = vec4(result, 1.0);
-}
+        fragColor = vec4(result, 1.0);
+    }
+)text";
+
+static const char* const checkerboard_resolve_fs = R"text(
+    #version 330 core
+    in vec2 uv;
+    out vec4 fragColor;
+
+    uniform sampler2D currentTex;
+    uniform sampler2D previousTex;
+    uniform int frameIndex;
+    uniform vec2 texelSize;
+
+    void main() {
+        ivec2 coord = ivec2(gl_FragCoord.xy);
+        bool thisFramePixel = ((coord.x + coord.y + frameIndex) % 2 == 0);
+
+        if (thisFramePixel) {
+            // ie, if pixel X is written, use it directly
+            fragColor = texture(currentTex, uv);
+        } else {
+        // Reconstruct from the previous frame with a 4 average for smoothing
+        // Ie, if this pixel was skipped use data from 4 average
+        vec3 c = texture(previousTex, uv).rgb;
+        c += texture(previousTex, uv + vec2( texelSize.x, 0.0)).rgb;
+        c += texture(previousTex, uv + vec2(-texelSize.x, 0.0)).rgb;
+        c += texture(previousTex, uv + vec2(0.0,  texelSize.y)).rgb;
+        fragColor = vec4(c * 0.25, 1.0);
+        }
+    }
 )text";
 
 
@@ -924,6 +962,16 @@ static GLint  s_composite_bloomStrengthLoc;
 // Quarter res bloom because I'm lazy
 static const int BLOOM_W = 320;
 static const int BLOOM_H = 180;
+
+// Checkerboard rendering
+static GLuint s_prevSceneFbo;
+static GLuint s_prevSceneTex;
+static GLuint s_resolveProg;
+
+static GLint  s_resolve_frameIndexLoc;
+static GLint  s_resolve_texelSizeLoc;
+static GLint  s_rt_frameIndexLoc;
+static int    s_frameIndex = 0;
 
 // Create bloom textures
 static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
@@ -1010,8 +1058,7 @@ void BHRTSceneInit()
     glUseProgram(s_program);
 
     loc_camPos = glGetUniformLocation(s_program, "camPos");
-    loc_view   = glGetUniformLocation(s_program, "view");
-
+    loc_view = glGetUniformLocation(s_program, "view");
 
     glUniform1i(tex2loc, 1);
 
@@ -1040,6 +1087,7 @@ void BHRTSceneInit()
     s_lastFrameTime = s_startTicks;
     s_fpsUpdateTime = s_startTicks;
     s_frameCount = 0;
+
     
     // Initialize text renderer for FPS display
     initTextRenderer();    
@@ -1096,6 +1144,49 @@ void BHRTSceneInit()
     // global intensity
     glUniform1f(s_composite_bloomStrengthLoc, 2.4f);
 
+    // Checkerboard
+    // Previous scene needs the same format
+    makeFbo(s_prevSceneFbo, s_prevSceneTex, 1280, 720);
+
+    // Comp resolve
+    GLuint resolve_vsh = createAndCompileShader(GL_VERTEX_SHADER, rt_vs);
+    GLuint resolve_fsh = createAndCompileShader(GL_FRAGMENT_SHADER, checkerboard_resolve_fs);
+    s_resolveProg = glCreateProgram();
+    glAttachShader(s_resolveProg, resolve_vsh);
+    glAttachShader(s_resolveProg, resolve_fsh);
+    glLinkProgram(s_resolveProg);
+    glDeleteShader(resolve_vsh);
+    glDeleteShader(resolve_fsh);
+
+    // What the fuck we're debugging now?
+    {
+    GLint ok;
+    glGetProgramiv(s_resolveProg, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char buf[512];
+        glGetProgramInfoLog(s_resolveProg, sizeof(buf), nullptr, buf);
+        FILE* f = fopen("/switch/bhrt_err.txt", "a");
+        if (f) { fprintf(f, "RESOLVE LINK:\n%s\n", buf); fclose(f); }
+    }
+    }
+
+    // Setup samplers for resolve
+    glUseProgram(s_resolveProg);
+    glUniform1i(glGetUniformLocation(s_resolveProg, "currentTex"),  0);
+    glUniform1i(glGetUniformLocation(s_resolveProg, "previousTex"), 1);
+    glUniform2f(glGetUniformLocation(s_resolveProg, "texelSize"), 1.0f / 1280.0f, 1.0f / 720.0f);
+    s_resolve_frameIndexLoc = glGetUniformLocation(s_resolveProg, "frameIndex");
+
+    // Cache frameindexes in raymarcher
+    glUseProgram(s_program);
+    s_rt_frameIndexLoc = glGetUniformLocation(s_program, "frameIndex");
+
+    // Clear the previous frame so 0 reads something
+    glBindFramebuffer(GL_FRAMEBUFFER, s_prevSceneFbo);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
     glUseProgram(s_program);
 
 }
@@ -1139,6 +1230,7 @@ void BHRTRender()
     // FPS calculation
     u64 currentTime = armGetSystemTick();
     s_frameCount++;
+
     u64 timeSinceUpdate = currentTime - s_fpsUpdateTime;
     float secondsSinceUpdate = (timeSinceUpdate * 625.0f / 12.0f) / 1000000000.0f;
     
@@ -1146,6 +1238,7 @@ void BHRTRender()
         s_fps = s_frameCount / secondsSinceUpdate;
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;
+
     }
 
     glBindVertexArray(s_vao);
@@ -1159,10 +1252,10 @@ void BHRTRender()
     // RT + Scene
     glBindFramebuffer(GL_FRAMEBUFFER, s_sceneFbo);
     glViewport(0, 0, 1280, 720);
-    glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(s_program);
     glUniform3fv(loc_camPos, 1, camPos);
     glUniformMatrix3fv(loc_view, 1, GL_FALSE, view);
+    glUniform1i(s_rt_frameIndexLoc, s_frameIndex);
     glActiveTexture(GL_TEXTURE0); 
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
     glActiveTexture(GL_TEXTURE1); 
@@ -1171,12 +1264,23 @@ void BHRTRender()
     glUniform2f(resloc, 1280.0f, 720.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    // Resolve checkerboard
+    glBindFramebuffer(GL_FRAMEBUFFER, s_prevSceneFbo);
+    glViewport(0, 0, 1280, 720);
+    glUseProgram(s_resolveProg);
+    glUniform1i(s_resolve_frameIndexLoc, s_frameIndex);
+    glActiveTexture(GL_TEXTURE0); 
+    glBindTexture(GL_TEXTURE_2D, s_sceneTex);    // current (half-written)
+    glActiveTexture(GL_TEXTURE1); 
+    glBindTexture(GL_TEXTURE_2D, s_prevSceneTex); // previous (full)
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
     // Brightness to bloom
     glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboA);
     glViewport(0, 0, BLOOM_W, BLOOM_H);
     glUseProgram(s_bloomExtractProg);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_sceneTex);
+    glBindTexture(GL_TEXTURE_2D, s_prevSceneTex);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     // Actual blur, setup iterations
@@ -1193,6 +1297,7 @@ void BHRTRender()
         // B -> A Vertical
         glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboA);
         glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, s_bloomTexB);
         glUniform2f(s_blur_dirLoc, 0.0f, 1.0f);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
@@ -1202,7 +1307,7 @@ void BHRTRender()
     glViewport(0, 0, 1280, 720);
     glUseProgram(s_bloomCompositeProg);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_sceneTex);
+    glBindTexture(GL_TEXTURE_2D, s_prevSceneTex);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, s_bloomTexA);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1213,11 +1318,17 @@ void BHRTRender()
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
     drawText(fpsText, - 0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 
+    // flip for next frame
+    s_frameIndex ^= 1;
+
 }
 
 void BHRTExit()
 {
     cleanupTextRenderer();
+    glDeleteFramebuffers(1, &s_prevSceneFbo);
+    glDeleteTextures(1, &s_prevSceneTex);
+    glDeleteProgram(s_resolveProg);
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
