@@ -502,18 +502,29 @@ static const char* const fragmentShaderSource = R"text(
     // checkerboard
     uniform int frameIndex;
     uniform sampler3D noiseTex;
+    
+    // Precomp radial bands
+    uniform sampler2D orbitalLUT;
+
+    // h2 Interval
+    // uniform int h2Interval;
 
     // Phys params
     uniform float fovScale = 1.0;
 
     // Accretion disk
     uniform float adiskHeight = 0.1;
-    uniform float adiskLit = 5;
+    uniform float adiskLit = 15;
     uniform float adiskDensityV = 2.0;
     uniform float adiskDensityH = 1.5;
     uniform float adiskNoiseScale = 0.4;
     uniform float adiskNoiseLOD = 5.0;
     uniform float adiskSpeed = 0.12;
+    uniform float orbitalScale;
+
+    uniform sampler2D deflectionMap;
+    uniform float photonScreenRadius;
+
 
     struct Ring {
         vec3 center;
@@ -626,8 +637,9 @@ static const char* const fragmentShaderSource = R"text(
 
     vec3 accel(float h2, vec3 pos) {
         float r2 = dot(pos, pos);
-        float r5 = pow(r2, 2.5);
-        vec3 acc = -1.5 * h2 * pos / r5 * 1.0;
+        float r4 = r2 * r2;
+        float r2_5 = r4 * sqrt(r2);
+        vec3 acc = -1.5 * h2 * pos / r2_5;
         return acc;
     }
 
@@ -759,12 +771,13 @@ static const char* const fragmentShaderSource = R"text(
 
         // hell
         float theta = atan(pos.z, pos.x);
-        float orbitalSpeed = 2.5 / pow(max(r, 0.2), 1.5);
+        float radialU = clamp((r - innerRadius) / (outerRadius - innerRadius), 0.0, 1.0);
+        vec2  cs = textureLod(orbitalLUT, vec2(radialU, 0.5), 0.0).rg;
 
-        // Comp a dynamic rotation angle for noise
-        float rotAngle = theta + time * orbitalSpeed;
-        float cosA = cos(rotAngle);
-        float sinA = sin(rotAngle);
+        float cosT = cos(theta);
+        float sinT = sin(theta);
+        float cosA = cosT * cs.x - sinT * cs.y;
+        float sinA = sinT * cs.x + cosT * cs.y;
 
         // Rotate the actual local XZ space smoothly over time
         vec3 rotatedPos = pos;
@@ -908,15 +921,64 @@ static const char* const fragmentShaderSource = R"text(
 
     void main() {
         ivec2 coord = ivec2(gl_FragCoord.xy);
-        // Checkerboard rendering, ie skip pixels if they belong to another frame
-        if ((coord.x + coord.y + frameIndex) % 2 != 0) {
+        if ((coord.x + coord.y + frameIndex) % 2 != 0){
             discard;
         }
-
         vec2 uv = gl_FragCoord.xy / res - vec2(0.5);
-        uv.x *= res.x / res.y;
+        uv.x   *= res.x / res.y;
+
+        // Distance from black hole, good enough for LOD
+        float screenDist = length(uv);
+
         vec3 dir = view * normalize(vec3(-uv.x * fovScale, uv.y * fovScale, 1.0));
-        fragColor = vec4(traceColor(camPos, dir), 1.0);
+
+        vec3 color;
+
+        if (screenDist > photonScreenRadius) {
+            // If we can, use the fast path
+            // Sample the CPU-computed exit direction
+            vec2 deflectUV  = gl_FragCoord.xy / res; // [0,1]
+            vec4 deflection = textureLod(deflectionMap, deflectUV, 0.0);
+
+            if (deflection.w < 0.5) {
+                // if hit BH, black
+                color = vec3(0.0);
+            } else {
+                // Exit direction from CPU
+                vec3 exitDir = normalize(deflection.xyz);
+                // Run GPU accumulation on color anyway as some is needed
+                color = vec3(0.0);
+                float alpha = 1.0;
+                float adiskEnabled = 1.0;
+                if (adiskEnabled > 0.5) {
+                    // Single disk sample at the ray-disk plane intersection
+                    // instead of the full volumetric march
+                    float t_disk = -camPos.y / exitDir.y;
+                    if (t_disk > 0.0) {
+                        // March through some of the disk anyway
+                        float RT = 1.5;
+                        float marchStart = t_disk - RT;
+                        float marchEnd = t_disk + RT;
+
+                        // calc the actual step between loop iterations
+                        float stepWorld = (marchEnd - marchStart) / 31;
+                        for(int i = 0; i < 32; i++){
+                            float t = mix(marchStart, marchEnd, float(i) / 31.0);
+                            vec3 p = camPos + exitDir * t;
+                            adiskColor(p, color, alpha, stepWorld, exitDir);
+                            if(alpha < 0.01) 
+                                break;
+                        }
+                    }
+                }
+                color += textureLod(galaxy, exitDir, 0.0).rgb * alpha;
+            }
+        } else {
+            // If we are close enough, use the full tracing
+            color = traceColor(camPos, dir);
+        }
+
+        fragColor = vec4(color, 1.0);
     }
 )text";
 
@@ -1057,11 +1119,35 @@ static int    s_frameIndex = 0;
 static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
+// Deflection map 
+static const int DEFLECT_W = 320;
+static const int DEFLECT_H = 180;
+static GLuint s_deflectionTex;
+static GLint s_deflectionTexLoc;
+
+alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
+static std::atomic<int> s_deflectReadBuf{0};
+static std::atomic<bool> s_deflectReady{false};
+
+// Uniforms for worker thread
+struct alignas(64) FrameUniforms {
+    float camPos[3];
+    float view[9];
+    float orbitalLUT[256 * 4];
+};
+
+static FrameUniforms g_uniforms[2];
+static std::atomic<int>  g_uniformWriteIdx{0};
+static std::atomic<bool> g_uniformReady{false};
+static std::mutex        g_uniformMutex;
+
+static std::thread s_deflectThread;
+
+
 // Ah fuck me the insanity starts 
 // I could just keep noise in the shader, but fuck me I want to melt shit today, so here we go
 float snoise_cpu(float v_x, float v_y, float v_z)
 {
-    pinThread(1);
     // Constants
     const float C_x = 1.0f / 6.0f;
     const float C_y = 1.0f / 3.0f;
@@ -1201,7 +1287,8 @@ float snoise_cpu(float v_x, float v_y, float v_z)
 // Make a 64^3 texture for the accretion disk
 static void buildNoise3()
 {
-    const int N = 128;
+    pinThread(1);
+    const int N = 64;
     std::vector<uint8_t> data(N * N * N);
     for (int z = 0; z < N; z++)
     for (int y = 0; y < N; y++)
@@ -1223,6 +1310,264 @@ static void buildNoise3()
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
 
+}
+
+// Compute rotation matrix for accretion disk on CPU
+// Theta is inherently per fragment, but orbitalSpeed only depends on r.
+// For our purposes we only need a few radial bands, so we can precomp a 1D lookup texture
+// We use (cos(time * orbitalSpeed), sin(time * orbitalSpeed)) for every given radius
+// 256 radial samples
+static float s_orbitalLUT[256 * 2];
+static GLuint s_orbitalLUTTex;
+static GLint loc_orbitalLUT;
+
+void updateOrbitalLUT(float t) 
+{
+    // Constants for shader
+    const float innerRadius = 2.6f;
+    const float outerRadius = 12.0f;
+    const float orbitalScale = 2.5f;
+
+    int i = 0;
+    for (; i <= 252; i += 4){
+        //comp normalized radial positions
+        // u = i/255 mapped to inner/outer radi
+        float32x4_t idx = { (float)i, (float)(i+1), (float)(i+2), (float)(i+3) };
+        float32x4_t u = vmulq_n_f32(idx, 1.0f / 255.0f);
+        float32x4_t r = vmlaq_n_f32(vdupq_n_f32(innerRadius), u, outerRadius - innerRadius);
+
+        // Orbital speed just equals oscale / r^1.5
+        float32x4_t rsqrt_r = vrsqrteq_f32(r);
+        rsqrt_r = vmulq_f32(rsqrt_r, vrsqrtsq_f32(vmulq_f32(r, rsqrt_r), rsqrt_r));
+        float32x4_t sqrt_r = vmulq_f32(r, rsqrt_r);
+        float32x4_t r1_5 = vmulq_f32(r, sqrt_r);
+
+        // Reciprocal
+        float32x4_t rcp = vrecpeq_f32(r1_5);
+        rcp = vmulq_f32(rcp, vrecpsq_f32(r1_5, rcp));
+        float32x4_t speed = vmulq_n_f32(rcp, orbitalScale);
+
+        // angle = t * speed
+        float32x4_t angle = vmulq_n_f32(speed, t);
+
+        // fallback because sincos is goofy
+        float angles[4];
+        vst1q_f32(angles, angle); 
+
+        float cs[8];
+        fastSinCos(angles[0], &cs[1], &cs[0]);
+        fastSinCos(angles[1], &cs[3], &cs[2]);
+        fastSinCos(angles[2], &cs[5], &cs[4]);
+        fastSinCos(angles[3], &cs[7], &cs[6]);
+
+        // Write into LUT
+        // Layout is just c0, s0, c1, s1 and so on
+        s_orbitalLUT[(i+0)*2 + 0] = cs[0]; s_orbitalLUT[(i+0)*2 + 1] = cs[1];
+        s_orbitalLUT[(i+1)*2 + 0] = cs[2]; s_orbitalLUT[(i+1)*2 + 1] = cs[3];
+        s_orbitalLUT[(i+2)*2 + 0] = cs[4]; s_orbitalLUT[(i+2)*2 + 1] = cs[5];
+        s_orbitalLUT[(i+3)*2 + 0] = cs[6]; s_orbitalLUT[(i+3)*2 + 1] = cs[7];
+    }
+
+    // fallbacks for remaining samples, slower but should never happen unless LUT is changed
+    for(; i < 256; i++){
+        float u = i / 255.0f;
+        float r = innerRadius + u * (outerRadius - innerRadius);
+        float speed = orbitalScale / powf(fmaxf(r, 0.2f), 1.5f);
+        float angle = t * speed;
+        fastSinCos(angle, &s_orbitalLUT[i*2 + 1], &s_orbitalLUT[i*2 + 0]);
+    }
+
+    // Finally upload to GPU
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1, GL_RG, GL_FLOAT, s_orbitalLUT);
+}
+
+// Calulates a deflection map for the gravitational lensing field on the CPU
+// Then we save as a texture, as the GPU will compute the pixels closer to it
+static inline float32x4x3_t neon_accel(float32x4_t h2, float32x4_t px, float32x4_t py, float32x4_t pz)
+{
+    float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
+    float32x4_t r4 = vmulq_f32(r2, r2);
+    float32x4_t rsqrt_r = vrsqrteq_f32(r2);
+    rsqrt_r = vmulq_f32(rsqrt_r, vrsqrtsq_f32(vmulq_f32(r2, rsqrt_r), rsqrt_r));
+    float32x4_t r2_5 = vmulq_f32(r4, vmulq_f32(r2, rsqrt_r));
+
+    // rcp = 1 / r2_5
+    float32x4_t rcp = vrecpeq_f32(r2_5);
+    rcp = vmulq_f32(rcp, vrecpsq_f32(r2_5, rcp));
+
+    // scale = -1.5 * h2 / r2_5
+    float32x4_t scale = vmulq_n_f32(vmulq_f32(h2, rcp), -1.5f);
+
+    float32x4x3_t result;
+    result.val[0] = vmulq_f32(scale, px);
+    result.val[1] = vmulq_f32(scale, py);
+    result.val[2] = vmulq_f32(scale, pz);
+    return result;
+}
+
+// fuck me its RT time
+// Trace 4 rays
+static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW)
+{
+    float32x4_t px = vdupq_n_f32(cpx);
+    float32x4_t py = vdupq_n_f32(cpy);
+    float32x4_t pz = vdupq_n_f32(cpz);
+
+    // Angular momentum (h) = cross(pos, dir), h2 = dot(h, h)
+    float32x4_t hx = vsubq_f32(vmulq_f32(py, dz), vmulq_f32(pz, dy));
+    float32x4_t hy = vsubq_f32(vmulq_f32(pz, dx), vmulq_f32(px, dz));
+    float32x4_t hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
+    float32x4_t h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
+
+    // setup mask to determine to kill rays or not
+    // 1.0 still marching, terminated
+    float32x4_t alive = vdupq_n_f32(1.0f);
+    float32x4_t hitBH = vdupq_n_f32(0.0f);
+
+    for (int i = 0; i < 250; i++) {
+        float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
+
+        //adaptive steps so we don't waste rays
+        float32x4_t rsqrt_r = vrsqrteq_f32(r2);
+        rsqrt_r = vmulq_f32(rsqrt_r, vrsqrtsq_f32(vmulq_f32(r2, rsqrt_r), rsqrt_r));
+        float32x4_t dist = vmulq_f32(r2, rsqrt_r);
+        float32x4_t stepSize = vminq_f32(vmaxq_f32( vmulq_n_f32(dist, 0.04f), vdupq_n_f32(0.02f)), vdupq_n_f32(0.3f));
+
+        // Lensing
+        float32x4x3_t acc = neon_accel(h2, px, py, pz);
+        dx = vaddq_f32(dx, vmulq_f32(acc.val[0], stepSize));
+        dy = vaddq_f32(dy, vmulq_f32(acc.val[1], stepSize));
+        dz = vaddq_f32(dz, vmulq_f32(acc.val[2], stepSize));
+
+        // Update H2
+        hx = vsubq_f32(vmulq_f32(py, dz), vmulq_f32(pz, dy));
+        hy = vsubq_f32(vmulq_f32(pz, dx), vmulq_f32(px, dz));
+        hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
+        h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
+
+        // Check for event horizon (ie if r2 <1)
+        uint32x4_t insideEH = vcltq_f32(r2, vdupq_n_f32(1.0f));
+        // If rays are dead, set as BH hits
+        uint32x4_t justDied = vandq_u32(insideEH, vreinterpretq_u32_f32(alive));
+        hitBH = vaddq_f32(hitBH, vreinterpretq_f32_u32(justDied));
+
+        // Kill rays
+        alive = vreinterpretq_f32_u32( vbicq_u32(vreinterpretq_u32_f32(alive), insideEH));
+
+        // Advance only active rarys
+        px = vaddq_f32(px, vmulq_f32(vmulq_f32(dx, stepSize), alive));
+        py = vaddq_f32(py, vmulq_f32(vmulq_f32(dy, stepSize), alive));
+        pz = vaddq_f32(pz, vmulq_f32(vmulq_f32(dz, stepSize), alive));
+
+        // If 4 rays are dead, exit
+        if (vmaxvq_u32(vreinterpretq_u32_f32(alive)) == 0)
+            break;
+    }
+
+    // normalize exit directions
+    float32x4_t len2 = vmlaq_f32(vmlaq_f32(vmulq_f32(dx,dx), dy,dy), dz,dz);
+    float32x4_t rlen = vrsqrteq_f32(len2);
+    rlen = vmulq_f32(rlen, vrsqrtsq_f32(vmulq_f32(len2, rlen), rlen));
+
+    vst1q_f32(outX, vmulq_f32(dx, rlen));
+    vst1q_f32(outY, vmulq_f32(dy, rlen));
+    vst1q_f32(outZ, vmulq_f32(dz, rlen));
+    // if exit, 1, else 0 if BH
+    uint32x4_t wasBH  = vcgtq_f32(hitBH, vdupq_n_f32(0.0f));
+    float32x4_t exitW = vreinterpretq_f32_u32( vbicq_u32(vdupq_n_u32(0x3F800000u), wasBH));
+    vst1q_f32(outW, exitW);
+
+}
+
+// Deflection map creation
+static void deflectionWorkerFunc()
+{
+    pinThread(1);
+
+    // Track last cam position
+    float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
+    // Rebuild if camera moves over 0.05 units
+    const float REBUILD_THRESHOLD = 0.05f;
+
+    while (running.load(std::memory_order_acquire))
+    {
+        // Read current cam position
+        float camPos[3], view[9];
+        {
+            std::lock_guard<std::mutex> lk(g_uniformMutex);
+            memcpy(camPos, g_uniforms[g_uniformWriteIdx].camPos, 12);
+            memcpy(view, g_uniforms[g_uniformWriteIdx].view, 36);
+        }
+
+        // check if rebuild is required
+        float dx = camPos[0]-lastCamPos[0];
+        float dy = camPos[1]-lastCamPos[1];
+        float dz = camPos[2]-lastCamPos[2];
+        if (dx*dx + dy*dy + dz*dz < REBUILD_THRESHOLD * REBUILD_THRESHOLD) {
+            // if we don't need to rebuild, wait 2ms
+            svcSleepThread(2000000ULL);
+            continue;
+        }
+        memcpy(lastCamPos, camPos, 12);
+        
+        int writeBuf = s_deflectReadBuf.load() ^ 1;
+        float* buf = s_deflectBuf[writeBuf];
+
+        // Process 4 pixels per call
+        for (int py_idx = 0; py_idx < DEFLECT_H; py_idx++)
+        for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
+        {
+            // Build rays from view matrix + uv
+            float uv[4][2];
+            for (int k = 0; k < 4; k++) {
+                float u = ((px_idx + k + 0.5f) / DEFLECT_W) - 0.5f;
+                float v = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
+                // correct for aspect
+                u *= (float)DEFLECT_W / DEFLECT_H;
+                uv[k][0] = -u;
+                uv[k][1] = v;
+            }
+
+            const float fov = 1.0f;
+            float ldx[4], ldy[4], ldz[4];
+            for (int k = 0; k < 4; k++) {
+                // Local dir in cam space
+                float lx = uv[k][0] * fov;
+                float ly = uv[k][1] * fov;
+                float lz = 1.0f;
+                float len = sqrtf(lx*lx + ly*ly + lz*lz);
+
+                lx /= len;
+                ly /= len; 
+                lz /= len;
+
+                // Transform by view matrix
+                ldx[k] = view[0]*lx + view[3]*ly + view[6]*lz;
+                ldy[k] = view[1]*lx + view[4]*ly + view[7]*lz;
+                ldz[k] = view[2]*lx + view[5]*ly + view[8]*lz;
+            }
+            float32x4_t dx4 = vld1q_f32(ldx);
+            float32x4_t dy4 = vld1q_f32(ldy);
+            float32x4_t dz4 = vld1q_f32(ldz);
+
+
+            float outX[4], outY[4], outZ[4], outW[4];
+            traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW);
+
+            // write RGBA into buffer
+            int base = (py_idx * DEFLECT_W + px_idx) * 4;
+            for (int k = 0; k < 4; k++) {
+                buf[base + k*4 + 0] = outX[k];
+                buf[base + k*4 + 1] = outY[k];
+                buf[base + k*4 + 2] = outZ[k];
+                buf[base + k*4 + 3] = outW[k];
+            }
+        }
+        s_deflectReadBuf.store(writeBuf, std::memory_order_release);
+        s_deflectReady.store(true,       std::memory_order_release);
+    }
 }
 
 // Create bloom textures
@@ -1249,6 +1594,8 @@ void BHRTSceneInit()
     GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, vertexShaderSource);
     GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
 
+
+
     s_program = glCreateProgram();
     glAttachShader(s_program, vsh);
     glAttachShader(s_program, fsh);
@@ -1259,6 +1606,7 @@ void BHRTSceneInit()
     resloc = glGetUniformLocation(s_program, "res");
     s_noiseTexLoc = glGetUniformLocation(s_program, "noiseTex");
     buildNoise3();
+    // loc_h2Interval = glGetUniformLocation(s_program, "h2Interval");
 
     // Can you tell most of this is a rehash of old bullshit
     GLint success;
@@ -1295,9 +1643,7 @@ void BHRTSceneInit()
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
-    // Dummy 2D color (1x1 orange)
-
-
+    // Disc color gradient
     glGenTextures(1, &tex2);
     glBindTexture(GL_TEXTURE_2D, tex2);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1308,15 +1654,33 @@ void BHRTSceneInit()
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
     stbi_image_free(img);
 
+    // Orbital LUT lookup
+    // Effectively a 256x1 texture, where R is cos and G is Sin
+    glGenTextures(1, &s_orbitalLUTTex);
+    glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, 256, 1, 0, GL_RG, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenTextures(1, &s_deflectionTex);
+    glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
 
     glUseProgram(s_program);
 
     loc_camPos = glGetUniformLocation(s_program, "camPos");
     loc_view = glGetUniformLocation(s_program, "view");
+    s_deflectionTexLoc = glGetUniformLocation(s_program, "deflectionMap");
+    glUniform1i(s_deflectionTexLoc, 4); // unit 4
 
     glUniform1i(tex2loc, 1);
-
-
 
     auto projMtx = glm::perspective(
         glm::radians(40.0f),
@@ -1335,6 +1699,8 @@ void BHRTSceneInit()
     glBindTexture(GL_TEXTURE_2D, tex2);
     glUniform1i(tex2loc, 1);
 
+    loc_orbitalLUT = glGetUniformLocation(s_program, "orbitalLUT");
+    glUniform1i(loc_orbitalLUT, 3);
 
 
     // Initialize FPS counter
@@ -1454,7 +1820,7 @@ float getTime5()
 // Compute camera positions on the CPU instead of GPU
 static void computeCamera_NEON(float t, float* outCamPos, float* outView)
 {
-    pinThread(0);
+
 
     float s = sinf(t * 0.1f);
     float c = cosf(t * 0.1f);
@@ -1497,17 +1863,39 @@ void BHRTRender()
     }
 
     glBindVertexArray(s_vao);
+    float t = getTime5();
 
     // Compute camera positions on CPU
     float camPos[3];
     float view[9];
-    computeCamera_NEON(getTime5(), camPos, view);
+    computeCamera_NEON(t, camPos, view);
+
+    // Check how often h2 actually needs to be updated based on distance
+    // float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
+    // int h2UpdateInterval = (int)clamp(camDist * 0.5f, 1.0f, 8.0f);
+    // glUniform1i(loc_h2Interval, h2UpdateInterval);
+
+    float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
+    float photonRadius = 20.0f / camDist; // shrinks as camera pulls back
+
+    // Actually write camera data for CPU Thread
+    {
+        std::lock_guard<std::mutex> lk(g_uniformMutex);
+        int wi = g_uniformWriteIdx.load() ^ 1;
+        memcpy(g_uniforms[wi].camPos, camPos, sizeof(camPos));
+        memcpy(g_uniforms[wi].view, view, sizeof(view));
+        g_uniformWriteIdx.store(wi, std::memory_order_release);
+        g_uniformReady.store(true, std::memory_order_release);
+    }
+
+    updateOrbitalLUT(t);
 
 
     // RT + Scene
     glBindFramebuffer(GL_FRAMEBUFFER, s_sceneFbo);
     glViewport(0, 0, 1280, 720);
     glUseProgram(s_program);
+    glUniform1f(glGetUniformLocation(s_program, "photonScreenRadius"), photonRadius);
     glUniform3fv(loc_camPos, 1, camPos);
     glUniformMatrix3fv(loc_view, 1, GL_FALSE, view);
     glUniform1i(s_rt_frameIndexLoc, s_frameIndex);
@@ -1518,8 +1906,19 @@ void BHRTRender()
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_3D, s_noiseTex3D);
     glUniform1i(s_noiseTexLoc, 2);
-    glUniform1f(loc_time, getTime5());
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
+    glUniform1f(loc_time, t);
     glUniform2f(resloc, 1280.0f, 720.0f);
+
+    if (s_deflectReady.load(std::memory_order_acquire)) {
+        int readBuf = s_deflectReadBuf.load();
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[readBuf]);
+        s_deflectReady.store(false, std::memory_order_release);
+    }
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     // Resolve checkerboard
@@ -1590,6 +1989,9 @@ void BHRTExit()
     glDeleteBuffers(1, &s_vbo);
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
+    glDeleteTextures(1, &s_orbitalLUTTex);
+    running.store(false, std::memory_order_release);
+    s_deflectThread.join();
 }
 
 int BHRTMain(int arcg, char* argv[])
@@ -1607,6 +2009,11 @@ int BHRTMain(int arcg, char* argv[])
     // Start our hell
     BHRTSceneInit();
 
+    // start computing on core1
+    computeCamera_NEON(getTime5(), g_uniforms[0].camPos, g_uniforms[0].view);
+    g_uniformWriteIdx.store(0);
+    s_deflectThread = std::thread(deflectionWorkerFunc);
+
     // Configure our supported input layout: a single player with standard controller styles
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 
@@ -1622,7 +2029,7 @@ int BHRTMain(int arcg, char* argv[])
         u32 kDown = padGetButtonsDown(&pad);
         if (kDown & HidNpadButton_B) {
             state = STATE_MENU;
-            return 0;
+            break;
         }
             
 

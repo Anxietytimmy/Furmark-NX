@@ -424,3 +424,30 @@ inline float32x4_t vtaylorInvSqrt(float32x4_t x)
     float32x4_t c2 = vdupq_n_f32(0.85373472095314f);
     return vmlsq_f32(c1, x, c2);
 }
+
+// FastSinCos, because math.c is a meme
+// Accurate to 6 decimals
+static inline void fastSinCos(float angle, float* s, float* c)
+{
+    // Rudce ranges to [-pi, pi]
+    const float INV_TWO_PI = 0.15915494309f;
+    const float TWO_PI = 6.28318530718f;
+    const float PI = 3.14159265359f;
+
+    float x = angle - TWO_PI * floorf(angle * INV_TWO_PI + 0.5f);
+
+    // Compute sin via +/- polynomia, only odd terms
+    // coeffs from Remez algo over constants
+    float x2 = x * x;
+    float x3 = x2 * x;
+    float x5 = x3 * x2;
+    float x7 = x5 * x3;
+
+    *s = x + x3 * (-0.16666667163f) + x5 * ( 0.00833333842f) + x7 * (-0.00019840680f);
+
+    // Comp cos via the same method, only even terms
+    float x4 = x2 * x2;
+    float x6 = x4 * x2;
+
+    *c = 1.0f + x2 * (-0.49999997020f) + x4 * ( 0.04166664556f) + x6 * (-0.00138873165f);
+}
