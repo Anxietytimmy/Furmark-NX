@@ -524,6 +524,7 @@ static const char* const fragmentShaderSource = R"text(
 
     uniform sampler2D deflectionMap;
     uniform float photonScreenRadius;
+    uniform sampler2D diskColorMap;
 
 
     struct Ring {
@@ -946,31 +947,9 @@ static const char* const fragmentShaderSource = R"text(
             } else {
                 // Exit direction from CPU
                 vec3 exitDir = normalize(deflection.xyz);
-                // Run GPU accumulation on color anyway as some is needed
-                color = vec3(0.0);
-                float alpha = 1.0;
-                float adiskEnabled = 1.0;
-                if (adiskEnabled > 0.5) {
-                    // Single disk sample at the ray-disk plane intersection
-                    // instead of the full volumetric march
-                    float t_disk = -camPos.y / exitDir.y;
-                    if (t_disk > 0.0) {
-                        // March through some of the disk anyway
-                        float RT = 1.5;
-                        float marchStart = t_disk - RT;
-                        float marchEnd = t_disk + RT;
-
-                        // calc the actual step between loop iterations
-                        float stepWorld = (marchEnd - marchStart) / 31;
-                        for(int i = 0; i < 32; i++){
-                            float t = mix(marchStart, marchEnd, float(i) / 31.0);
-                            vec3 p = camPos + exitDir * t;
-                            adiskColor(p, color, alpha, stepWorld, exitDir);
-                            if(alpha < 0.01) 
-                                break;
-                        }
-                    }
-                }
+                vec4 cpuDisk = textureLod(diskColorMap, deflectUV, 0.0);
+                color = cpuDisk.rgb;
+                float alpha = cpuDisk.a;
                 color += textureLod(galaxy, exitDir, 0.0).rgb * alpha;
             }
         } else {
@@ -1129,6 +1108,7 @@ static GLint s_deflectionTexLoc;
 // Disk color for CPU trace
 static GLuint s_diskColorTex;
 static GLint s_diskColorTexLoc;
+alignas(64) static float s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
 
 alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
@@ -1654,6 +1634,14 @@ static void deflectionWorkerFunc()
                 buf[base + k*4 + 1] = outY[k];
                 buf[base + k*4 + 2] = outZ[k];
                 buf[base + k*4 + 3] = outW[k];
+
+                // Hello my fellow at most .5% of the population that stil has a sole
+                // It is I, a wackass from an alternate universe
+                float* diskBuf = s_diskColorBuf[writeBuf];
+                diskBuf[base + k*4 + 0] = outDR[k];
+                diskBuf[base + k*4 + 1] = outDG[k];
+                diskBuf[base + k*4 + 2] = outDB[k];
+                diskBuf[base + k*4 + 3] = outDA[k];
             }
         }
         s_deflectReadBuf.store(writeBuf, std::memory_order_release);
@@ -1838,11 +1826,33 @@ void BHRTSceneInit()
     loc_camPos = glGetUniformLocation(s_program, "camPos");
     loc_view = glGetUniformLocation(s_program, "view");
     s_deflectionTexLoc = glGetUniformLocation(s_program, "deflectionMap");
+    s_diskColorTexLoc = glGetUniformLocation(s_program, "diskColorMap");
+
+    // A story time, an no I am not fucking joking on this
+    // I spent a good 2 fucking days questioning why the FUCK this didn't work
+    // I was damn near ready to rewrite half of this shit, when I realiezd something
+    // See this wonderful little piece of text down here?
     glActiveTexture(GL_TEXTURE4);
+    // Yeah this fucker? I forgot about it entirely, causing a bigger black void
+    // I spent so motherfucking long on this bullshit, all of for my sleep deprivation to fuck me over
+    // In conclusion, fuck insomnia, get 8 hours of sleep kids, and FUCK ME I HATE MYSELF
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
     glUniform1i(s_deflectionTexLoc, 4); // unit 4
 
     glUniform1i(tex2loc, 1);
+
+    // Bing chilling
+    // Disc color time fuckers
+    glGenTextures(1, &s_diskColorTex);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glUniform1i(s_diskColorTexLoc, 5);
 
     auto projMtx = glm::perspective(
         glm::radians(40.0f),
@@ -2046,12 +2056,19 @@ void BHRTRender()
     glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
     glUniform1f(loc_time, t);
     glUniform2f(resloc, 1280.0f, 720.0f);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
 
     if (s_deflectReady.load(std::memory_order_acquire)) {
         int readBuf = s_deflectReadBuf.load();
         glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[readBuf]);
+        glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+        glActiveTexture(GL_TEXTURE5);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[readBuf]);
+        glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
         s_deflectReady.store(false, std::memory_order_release);
     }
 
