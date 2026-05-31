@@ -993,6 +993,8 @@ static const char* const fragmentShaderSource = R"text(
                 vec4 cpuDisk = textureLod(diskColorMap, deflectUV, 0.0);
                 color = cpuDisk.rgb;
                 float alpha = cpuDisk.a;
+                // Apply time to match GPU
+                exitDir = rotateVector(exitDir, vec3(0.0, 1.0, 0.0), time);
                 color += sampleSky(exitDir) * alpha;
             }
         } else {
@@ -1539,7 +1541,7 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
                 cg *= powf(doppler, 1.5f);
                 cb *= powf(doppler, 1.5f);
 
-                float sampleAlpha = fminf(density * ss[lane] * absorption * beaming, 1.0f);
+                float sampleAlpha = fminf(density * ss[lane] * absorption * beaming * 0.45f, 1.0f);
                 float lit = 15.0f;
                 // write back
                 // Still asleep someplace new
@@ -1583,13 +1585,14 @@ static void deflectionWorkerFunc()
 {
     pinThread(1);
 
-    while (running.load(std::memory_order_acquire))
-    {
-        
         // Track last cam position
         float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
         // Rebuild if camera moves over 0.05 units
         const float REBUILD_THRESHOLD = 0.05f;
+
+    while (running.load(std::memory_order_acquire))
+    {
+
         // Read current cam position
         float camPos[3], view[9];
         {
