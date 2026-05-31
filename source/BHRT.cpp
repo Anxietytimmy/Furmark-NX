@@ -979,6 +979,7 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         fragColor = vec4(color, 1.0);
+
     }
 )text";
 
@@ -1120,10 +1121,14 @@ static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
 // Deflection map 
-static const int DEFLECT_W = 320;
-static const int DEFLECT_H = 180;
+static const int DEFLECT_W = 160;
+static const int DEFLECT_H = 90;
 static GLuint s_deflectionTex;
 static GLint s_deflectionTexLoc;
+
+// Disk color for CPU trace
+static GLuint s_diskColorTex;
+static GLint s_diskColorTexLoc;
 
 alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
@@ -1287,7 +1292,7 @@ float snoise_cpu(float v_x, float v_y, float v_z)
 // Make a 64^3 texture for the accretion disk
 static void buildNoise3()
 {
-    pinThread(1);
+    pinThread(0);
     const int N = 64;
     std::vector<uint8_t> data(N * N * N);
     for (int z = 0; z < N; z++)
@@ -1408,9 +1413,11 @@ static inline float32x4x3_t neon_accel(float32x4_t h2, float32x4_t px, float32x4
 }
 
 // fuck me its RT time
-// Trace 4 rays
-static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW)
+// Trace 4 rays, also outputs a texture
+// This accumulates over a curved path, since before we were tracing straight rays on a curved surface
+static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW, float* outDR, float* outDG, float* outDB, float* outDA)
 {
+    pinThread(1);
     float32x4_t px = vdupq_n_f32(cpx);
     float32x4_t py = vdupq_n_f32(cpy);
     float32x4_t pz = vdupq_n_f32(cpz);
@@ -1421,12 +1428,18 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     float32x4_t hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
     float32x4_t h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
 
+    // Accumulate disk colors per lane
+    // We can't use neon effectively, as vertors here are a fucking pain
+    float diskR[4] = {}, diskG[4] = {}, diskB[4] = {};
+    float diskAlpha[4] = {1.f, 1.f, 1.f, 1.f};
+    const float innerR = 2.6f, outerR = 12.0f, thinH = 0.18f, absorption = 1.2f;
+
     // setup mask to determine to kill rays or not
     // 1.0 still marching, terminated
     float32x4_t alive = vdupq_n_f32(1.0f);
     float32x4_t hitBH = vdupq_n_f32(0.0f);
 
-    for (int i = 0; i < 250; i++) {
+    for (int i = 0; i < 32; i++) {
         float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
 
         //adaptive steps so we don't waste rays
@@ -1461,6 +1474,61 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
         py = vaddq_f32(py, vmulq_f32(vmulq_f32(dy, stepSize), alive));
         pz = vaddq_f32(pz, vmulq_f32(vmulq_f32(dz, stepSize), alive));
 
+        // Accumulate disk rays using the actual bent path
+        {
+            float pxs[4], pys[4], pzs[4], dxs[4], dys[4], dzs[4], ss[4], als[4];
+            vst1q_f32(pxs, px); 
+            vst1q_f32(pys, py);
+            vst1q_f32(pzs, pz);
+            vst1q_f32(dxs, dx);
+            vst1q_f32(dys, dy);
+            vst1q_f32(dzs, dz);
+            vst1q_f32(ss, stepSize);
+            vst1q_f32(als, alive);
+            //I thought I'd see you again
+            for (int lane = 0; lane < 4; lane++) {
+                if (als[lane] < 0.5f || diskAlpha[lane] < 0.01f) continue;
+                float px_ = pxs[lane], py_ = pys[lane], pz_ = pzs[lane];
+                float r_xz = sqrtf(px_ * px_ + pz_ * pz_);
+                // Check density
+                float density = 1.0f - sqrtf((px_ / outerR) * (px_ / outerR) + (py_ / thinH) * (py_ / thinH) + (pz_ / outerR) * (pz_ / outerR));
+                if (density < 0.001f || r_xz < innerR || r_xz > outerR) continue;
+                // Comp disk color from radial band
+                float radT = (r_xz - innerR) / (outerR - innerR);
+                float vertFade = 1.0f - fabsf(py_) / thinH;
+                vertFade = vertFade * vertFade * vertFade * vertFade * vertFade * vertFade;
+                density *= vertFade;
+                if (density < 0.003f) continue;
+                // Doppler shift, shrimple
+                // You never did
+                float speed = fminf(0.65f / sqrtf(fmaxf(r_xz, 2.f)), 0.6f);
+                // Orbital direction
+                float vx = -pz_ / r_xz, vz = px_ / r_xz;
+                float len_d = sqrtf(dxs[lane] * dxs[lane] + dys[lane] * dys[lane] + dzs[lane] * dzs[lane]);
+                float cosT = -(dxs[lane] * vx + dzs[lane] * vz) / (len_d + 1e-8f);
+                float gamma_ = 1.0f / sqrtf(1.0f - speed * speed);
+                float doppler = 1.0f / (gamma_ * (1.0f - cosT * speed));
+                doppler = fmaxf(doppler, 0.001f);
+                float beaming = doppler * doppler * doppler * doppler;
+                float cr = (radT < 0.2f) ? (1.3f * (1.f - radT / 0.2f) + 1.0f * (radT / 0.2f)) : (1.0f * (1.f - (radT - 0.2f) / 0.8f) + 0.4f * (radT - 0.2f) / 0.8f);
+                float cg = (radT < 0.2f) ? (1.1f * (1.f - radT / 0.2f) + 0.4f * (radT / 0.2f)) : (0.4f * (1.f - (radT - 0.2f) / 0.8f) + 0.02f * (radT - 0.2f) / 0.8f);
+                float cb = (radT < 0.2f) ? (0.9f * (1.f - radT / 0.2f) + 0.05f * (radT / 0.2f)): (0.05f * (1.f - (radT - 0.2f) / 0.8f) + 0.0f * (radT - 0.2f) / 0.8f);
+                cr *= powf(doppler, 1.5f);
+                cg *= powf(doppler, 1.5f);
+                cb *= powf(doppler, 1.5f);
+
+                float sampleAlpha = fminf(density * ss[lane] * absorption * beaming, 1.0f);
+                float lit = 15.0f;
+                // write back
+                // Still asleep someplace new
+                diskR[lane] += cr * lit * sampleAlpha * diskAlpha[lane] * beaming;
+                diskG[lane] += cg * lit * sampleAlpha * diskAlpha[lane] * beaming;
+                diskB[lane] += cb * lit * sampleAlpha * diskAlpha[lane] * beaming;
+                diskAlpha[lane] *= (1.0f - sampleAlpha);
+            }
+        }
+
+
         // If 4 rays are dead, exit
         if (vmaxvq_u32(vreinterpretq_u32_f32(alive)) == 0)
             break;
@@ -1479,6 +1547,13 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     float32x4_t exitW = vreinterpretq_f32_u32( vbicq_u32(vdupq_n_u32(0x3F800000u), wasBH));
     vst1q_f32(outW, exitW);
 
+    // Write accumulated color
+    outDR[0] = diskR[0]; outDR[1] = diskR[1]; outDR[2] = diskR[2]; outDR[3] = diskR[3];
+    outDG[0] = diskG[0]; outDG[1] = diskG[1]; outDG[2] = diskG[2]; outDG[3] = diskG[3];
+    outDB[0] = diskB[0]; outDB[1] = diskB[1]; outDB[2] = diskB[2]; outDB[3] = diskB[3];
+    outDA[0] = diskAlpha[0]; outDA[1] = diskAlpha[1]; outDA[2] = diskAlpha[2]; outDA[3] = diskAlpha[3];
+
+
 }
 
 // Deflection map creation
@@ -1490,6 +1565,7 @@ static void deflectionWorkerFunc()
     float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
     // Rebuild if camera moves over 0.05 units
     const float REBUILD_THRESHOLD = 0.05f;
+    // Clear buffers
 
     while (running.load(std::memory_order_acquire))
     {
@@ -1515,10 +1591,24 @@ static void deflectionWorkerFunc()
         int writeBuf = s_deflectReadBuf.load() ^ 1;
         float* buf = s_deflectBuf[writeBuf];
 
+        // Precomp photon-sphere limits as to not process anything already done by the GPU
+        float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
+        float photonRadiusW = 10.0f / camDistW;
+        float photonRadiusSqW = photonRadiusW * photonRadiusW;
+        const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
+
         // Process 4 pixels per call
         for (int py_idx = 0; py_idx < DEFLECT_H; py_idx++)
         for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
         {
+            {
+                // Skip pixels which are inside the photon sphere
+                float cv = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
+                float cu = ((px_idx + 2.0f) / DEFLECT_W - 0.5f) * aspectW;
+
+                //if (cu * cu + cv * cv <= photonRadiusSqW)
+                //    continue;
+            }
             // Build rays from view matrix + uv
             float uv[4][2];
             for (int k = 0; k < 4; k++) {
@@ -1554,7 +1644,8 @@ static void deflectionWorkerFunc()
 
 
             float outX[4], outY[4], outZ[4], outW[4];
-            traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW);
+            float outDR[4], outDG[4], outDB[4], outDA[4];
+            traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW, outDR, outDG, outDB, outDA);
 
             // write RGBA into buffer
             int base = (py_idx * DEFLECT_W + px_idx) * 4;
@@ -1587,10 +1678,74 @@ static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// Compute camera positions on the CPU instead of GPU
+static void computeCamera_NEON(float t, float* outCamPos, float* outView)
+{
+
+    pinThread(2);
+    float s = sinf(t * 0.1f);
+    float c = cosf(t * 0.1f);
+
+    // camPos = -cos*15, sin*15, 0
+    float32x4_t eye = { -c * 15.f, s * 15.f, s * 15.f, 0.f};
+    float32x4_t target = vdupq_n_f32(0.f);
+    float32x4_t worldUp = { 0.f, 1.f, 0.f, 0.f};
+
+    // lookat
+    float32x4_t fwd = neon_normalize3(vsubq_f32(target, eye));
+    float32x4_t right = neon_normalize3(neon_cross3(fwd, worldUp));
+    float32x4_t newUp = neon_cross3(right, fwd);
+
+    // Write camPos
+    neon_store3(outCamPos, eye);
+
+    // assemble mat3
+    // Where lookat col0 -> right, col1 -> newUp, col2 -> -forward
+    float32x4_t neg_fwd = vnegq_f32(fwd);
+    neon_store3(outView + 0, right);
+    neon_store3(outView + 3, newUp);
+    neon_store3(outView + 6, fwd);
+}
+
 // Man we are FUCKED
+static void initTrace()
+{
+    pinThread(1);
+    
+    float initCamPos[3], initView[9];
+    computeCamera_NEON(0.0f, initCamPos, initView);
+    const float aspect = float(DEFLECT_W) / float(DEFLECT_H);
+
+    for(int row = 0; row < DEFLECT_H; row++) {
+        for(int col = 0; col < DEFLECT_W; col += 4) {
+            float ldx[4], ldy[4], ldz[4];
+            for(int k = 0; k < 4; k++) {
+                float u = ((col + k + 0.5f) / DEFLECT_W - 0.5f) * aspect;
+                float v = (row + 0.5f) / DEFLECT_H - 0.5f;                    
+                float lx = -u, ly = v, lz = 1.0f;
+                float len = sqrtf(lx * lx + ly * ly + lz * lz);
+                lx /= len; ly /= len; lz /= len;
+                ldx[k] = initView[0]*lx + initView[3]*ly + initView[6]*lz;
+                ldy[k] = initView[1]*lx + initView[4]*ly + initView[7]*lz;
+                ldz[k] = initView[2]*lx + initView[5]*ly + initView[8]*lz;
+            }
+            int base = (row * DEFLECT_W + col) * 4;
+            for (int k = 0; k < 4; k++) {
+                s_deflectBuf[0][base + k*4 + 0] = ldx[k];
+                s_deflectBuf[0][base + k*4 + 1] = ldy[k];
+                s_deflectBuf[0][base + k*4 + 2] = ldz[k];
+                // set W = 1, so rays are computed as escaped and not as hits
+                s_deflectBuf[0][base + k*4 + 3] = 1.0f;
+            }
+        }
+    }
+    // Memcpy into a 2nd buffer
+    memcpy(s_deflectBuf[1], s_deflectBuf[0], sizeof(s_deflectBuf[0]));
+}
 
 void BHRTSceneInit()
 {
+    pinThread(0);
     GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, vertexShaderSource);
     GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
 
@@ -1664,9 +1819,14 @@ void BHRTSceneInit()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // Set T=0 for camera positions, if not we just render nothing outside.
+    // Also pre init deflection buffers.
+    initTrace();
+
+
     glGenTextures(1, &s_deflectionTex);
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1817,34 +1977,7 @@ float getTime5()
         return (elapsed * 625 / 12) / 2000000000.0;
     }
 
-// Compute camera positions on the CPU instead of GPU
-static void computeCamera_NEON(float t, float* outCamPos, float* outView)
-{
 
-
-    float s = sinf(t * 0.1f);
-    float c = cosf(t * 0.1f);
-
-    // camPos = -cos*15, sin*15, 0
-    float32x4_t eye = { -c * 15.f, s * 15.f, s * 15.f, 0.f};
-    float32x4_t target = vdupq_n_f32(0.f);
-    float32x4_t worldUp = { 0.f, 1.f, 0.f, 0.f};
-
-    // lookat
-    float32x4_t fwd = neon_normalize3(vsubq_f32(target, eye));
-    float32x4_t right = neon_normalize3(neon_cross3(fwd, worldUp));
-    float32x4_t newUp = neon_cross3(right, fwd);
-
-    // Write camPos
-    neon_store3(outCamPos, eye);
-
-    // assemble mat3
-    // Where lookat col0 -> right, col1 -> newUp, col2 -> -forward
-    float32x4_t neg_fwd = vnegq_f32(fwd);
-    neon_store3(outView + 0, right);
-    neon_store3(outView + 3, newUp);
-    neon_store3(outView + 6, fwd);
-}
 
 void BHRTRender()
 {
@@ -1876,7 +2009,7 @@ void BHRTRender()
     // glUniform1i(loc_h2Interval, h2UpdateInterval);
 
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-    float photonRadius = 20.0f / camDist; // shrinks as camera pulls back
+    float photonRadius = 10.0f / camDist; // shrinks as camera pulls back
 
     // Actually write camera data for CPU Thread
     {
