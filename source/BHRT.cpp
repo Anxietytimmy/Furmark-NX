@@ -874,6 +874,50 @@ static const char* const fragmentShaderSource = R"text(
     float hash2d(vec2 co) {
         return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
     }
+
+    // Nebula/Skybox gen
+    // Reads from the actual galaxy texture first, then creates stars with varying intensities
+    float _starHash(vec2 p){
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    vec3 sampleSky(vec3 dir){
+        vec3 sky = textureLod(galaxy, dir, 0.0).rgb;
+
+        float phi = atan(dir.z, dir.x) * (1.0 / (2.0 * PI)) + 0.5;
+        float theta = asin(clamp(dir.y, -1.0, 1.0)) * (1.0 / PI) + 0.5;
+        vec2 uv = vec2(phi, theta);
+
+        // Star field
+        vec2 grid = uv * vec2(600.0, 300.0);
+        vec2 cell = floor(grid);
+        vec2 local = fract(grid);
+
+        float brightness = 0.0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                vec2 nc = cell + vec2(float(dx), float(dy));
+                // Random sub-cell position and magnitude
+                float jx = _starHash(nc);
+                float jy = _starHash(nc + vec2(1.3, 7.4));
+                float mag = _starHash(nc + vec2(3.7, 2.1));
+                // Power law for formula, mostly dim stars with rare bight points
+                mag = pow(mag, 5.0);
+                float d = length(local - vec2(float(dx), float(dy)) - vec2(jx, jy));
+
+                brightness += smoothstep(0.045, 0.0, d) * mag;
+            }
+        }
+        // Add star color, some closer to A/O types while others are K/G types
+        float warmth = _starHash(cell + vec2(9.1, 4.6));
+        vec3 starCol = mix(vec3(0.82, 0.91, 1.0), vec3(1.0,  0.82, 0.55), step(0.85, warmth));
+
+        // XMB ass wave
+        float band = exp(-abs(dir.y) * 5.5) * 0.022;
+        vec3  nebula = vec3(0.12, 0.18, 0.38) * band;
+
+        return sky + starCol * brightness + nebula;
+    }
     
     vec3 traceColor(vec3 pos, vec3 dir) {
         vec3 color = vec3(0.0);
@@ -912,7 +956,7 @@ static const char* const fragmentShaderSource = R"text(
         }
 
         dir = rotateVector(dir, vec3(0.0, 1.0, 0.0), time);
-        color += textureLod(galaxy, dir, 0.0).rgb * alpha;
+        color += sampleSky(dir) * alpha;
         return color;
     }
 
@@ -950,7 +994,7 @@ static const char* const fragmentShaderSource = R"text(
                 vec4 cpuDisk = textureLod(diskColorMap, deflectUV, 0.0);
                 color = cpuDisk.rgb;
                 float alpha = cpuDisk.a;
-                color += textureLod(galaxy, exitDir, 0.0).rgb * alpha;
+                color += sampleSky(exitDir) * alpha;
             }
         } else {
             // If we are close enough, use the full tracing
@@ -1397,7 +1441,6 @@ static inline float32x4x3_t neon_accel(float32x4_t h2, float32x4_t px, float32x4
 // This accumulates over a curved path, since before we were tracing straight rays on a curved surface
 static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW, float* outDR, float* outDG, float* outDB, float* outDA)
 {
-    pinThread(1);
     float32x4_t px = vdupq_n_f32(cpx);
     float32x4_t py = vdupq_n_f32(cpy);
     float32x4_t pz = vdupq_n_f32(cpz);
@@ -1419,7 +1462,7 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     float32x4_t alive = vdupq_n_f32(1.0f);
     float32x4_t hitBH = vdupq_n_f32(0.0f);
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 250; i++) {
         float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
 
         //adaptive steps so we don't waste rays
@@ -1586,8 +1629,8 @@ static void deflectionWorkerFunc()
                 float cv = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
                 float cu = ((px_idx + 2.0f) / DEFLECT_W - 0.5f) * aspectW;
 
-                //if (cu * cu + cv * cv <= photonRadiusSqW)
-                //    continue;
+                if (cu * cu + cv * cv <= photonRadiusSqW)
+                    continue;
             }
             // Build rays from view matrix + uv
             float uv[4][2];
@@ -1670,7 +1713,6 @@ static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
 static void computeCamera_NEON(float t, float* outCamPos, float* outView)
 {
 
-    pinThread(2);
     float s = sinf(t * 0.1f);
     float c = cosf(t * 0.1f);
 
@@ -1729,6 +1771,17 @@ static void initTrace()
     }
     // Memcpy into a 2nd buffer
     memcpy(s_deflectBuf[1], s_deflectBuf[0], sizeof(s_deflectBuf[0]));
+
+    // Int alpha to be 1 always so shit actually renders
+    for (int i = 0; i < DEFLECT_W * DEFLECT_H; i++) {
+        s_diskColorBuf[0][i * 4 + 0] = 0.0f;
+        s_diskColorBuf[0][i * 4 + 1] = 0.0f;
+        s_diskColorBuf[0][i * 4 + 2] = 0.0f;
+        s_diskColorBuf[0][i * 4 + 3] = 1.0f;
+    }
+    // memcpy results
+    memcpy(s_diskColorBuf[1], s_diskColorBuf[0], sizeof(s_diskColorBuf[0]));
+
 }
 
 void BHRTSceneInit()
