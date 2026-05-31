@@ -1838,6 +1838,8 @@ void BHRTSceneInit()
     loc_camPos = glGetUniformLocation(s_program, "camPos");
     loc_view = glGetUniformLocation(s_program, "view");
     s_deflectionTexLoc = glGetUniformLocation(s_program, "deflectionMap");
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
     glUniform1i(s_deflectionTexLoc, 4); // unit 4
 
     glUniform1i(tex2loc, 1);
@@ -1858,6 +1860,7 @@ void BHRTSceneInit()
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex2);
     glUniform1i(tex2loc, 1);
+
 
     loc_orbitalLUT = glGetUniformLocation(s_program, "orbitalLUT");
     glUniform1i(loc_orbitalLUT, 3);
