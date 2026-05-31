@@ -438,7 +438,6 @@ static int OutputY = 720;
 static const int THREAD_COUNT = 2;
 static std::thread workers[THREAD_COUNT];
 alignas(64) static std::atomic<bool> running(true);
-alignas(64) static std::atomic<int> tilesDone(0);
 
 static std::mutex workMutex;
 static std::condition_variable workCV;
@@ -889,8 +888,8 @@ static const char* const fragmentShaderSource = R"text(
         vec2 uv = vec2(phi, theta);
 
         // Star field
-        vec2 grid = uv * vec2(600.0, 300.0);
-        vec2 cell = floor(grid);
+        vec2 grid  = uv * vec2(600.0, 300.0);
+        vec2 cell  = floor(grid);
         vec2 local = fract(grid);
 
         float brightness = 0.0;
@@ -898,8 +897,8 @@ static const char* const fragmentShaderSource = R"text(
             for (int dx = -1; dx <= 1; dx++) {
                 vec2 nc = cell + vec2(float(dx), float(dy));
                 // Random sub-cell position and magnitude
-                float jx = _starHash(nc);
-                float jy = _starHash(nc + vec2(1.3, 7.4));
+                float jx  = _starHash(nc);
+                float jy  = _starHash(nc + vec2(1.3, 7.4));
                 float mag = _starHash(nc + vec2(3.7, 2.1));
                 // Power law for formula, mostly dim stars with rare bight points
                 mag = pow(mag, 5.0);
@@ -1584,14 +1583,13 @@ static void deflectionWorkerFunc()
 {
     pinThread(1);
 
-    // Track last cam position
-    float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
-    // Rebuild if camera moves over 0.05 units
-    const float REBUILD_THRESHOLD = 0.05f;
-    // Clear buffers
-
     while (running.load(std::memory_order_acquire))
     {
+        
+        // Track last cam position
+        float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
+        // Rebuild if camera moves over 0.05 units
+        const float REBUILD_THRESHOLD = 0.05f;
         // Read current cam position
         float camPos[3], view[9];
         {
@@ -1604,11 +1602,11 @@ static void deflectionWorkerFunc()
         float dx = camPos[0]-lastCamPos[0];
         float dy = camPos[1]-lastCamPos[1];
         float dz = camPos[2]-lastCamPos[2];
-        if (dx*dx + dy*dy + dz*dz < REBUILD_THRESHOLD * REBUILD_THRESHOLD) {
+        ///if (dx*dx + dy*dy + dz*dz < REBUILD_THRESHOLD * REBUILD_THRESHOLD) {
             // if we don't need to rebuild, wait 2ms
-            svcSleepThread(2000000ULL);
-            continue;
-        }
+            // svcSleepThread(2000000ULL);
+            // continue;
+        // }
         memcpy(lastCamPos, camPos, 12);
         
         int writeBuf = s_deflectReadBuf.load() ^ 1;
