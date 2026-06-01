@@ -30,6 +30,7 @@
 #include "vec23.h"
 #include "stb_image.h"
 #include "colormap_png.h"
+#include "sk_png.h"
 
 // nxlink support
 //-----------------------------------------------------------------------------
@@ -1602,7 +1603,10 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
     // Precomp photon-sphere limits as to not process anything already done by the GPU
     float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
     float photonRadiusW = 10.0f / camDistW;
-    float photonRadiusSqW = photonRadiusW * photonRadiusW;
+
+    // add an overlap zone to resolve missing pixels
+    float overlapRadius = photonRadiusW * 0.85f;
+    float photonRadiusSqW = photonRadiusW * overlapRadius;
     const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
 
     // Process 4 pixels per call
@@ -1843,15 +1847,17 @@ void BHRTSceneInit()
     // Make a dummy cube map for testing
     glGenTextures(1, &tex1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, tex1);
-    unsigned char px[3] = {0, 0, 0}; // Black test
+    stbi_uc* img = stbi_load_from_memory((const stbi_uc*)sk_png, sk_png_size, &width, &height, &nchan, 4);
     for (int f = 0; f < 6; f++){
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
     }
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        stbi_image_free(img);
+
 
     // Disc color gradient
     glGenTextures(1, &tex2);
@@ -1860,7 +1866,7 @@ void BHRTSceneInit()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    stbi_uc* img = stbi_load_from_memory((const stbi_uc*)colormap_png, colormap_png_size, &width, &height, &nchan, 4);
+    img = stbi_load_from_memory((const stbi_uc*)colormap_png, colormap_png_size, &width, &height, &nchan, 4);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
     stbi_image_free(img);
 
@@ -2091,16 +2097,6 @@ void BHRTRender()
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
     float photonRadius = 10.0f / camDist; // shrinks as camera pulls back
 
-    // Actually write camera data for CPU Thread
-    {
-        std::lock_guard<std::mutex> lk(g_uniformMutex);
-        int wi = g_uniformWriteIdx.load() ^ 1;
-        memcpy(g_uniforms[wi].camPos, camPos, sizeof(camPos));
-        memcpy(g_uniforms[wi].view, view, sizeof(view));
-        g_uniformWriteIdx.store(wi, std::memory_order_release);
-        g_uniformReady.store(true, std::memory_order_release);
-    }
-
     updateOrbitalLUT(t);
     deflectionWorkerFunc(camPos, view, s_deflectBuf[0], s_diskColorBuf[0]);
 
@@ -2123,22 +2119,13 @@ void BHRTRender()
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
     glUniform1f(loc_time, t);
-    glUniform2f(resloc, 1280.0f, 720.0f);
+    glUniform2f(resloc, RenderX, RenderY);
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-
-    if (s_deflectReady.load(std::memory_order_acquire)) {
-        int readBuf = s_deflectReadBuf.load();
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[readBuf]);
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[readBuf]);
-        s_deflectReady.store(false, std::memory_order_release);
-    }
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -2211,8 +2198,6 @@ void BHRTExit()
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
     glDeleteTextures(1, &s_orbitalLUTTex);
-    running.store(false, std::memory_order_release);
-    s_deflectThread.join();
 }
 
 int BHRTMain(int arcg, char* argv[])
