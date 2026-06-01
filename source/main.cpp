@@ -360,3 +360,5 @@ int main(int argc,char* argv[]){
     consoleExit(NULL);
     return EXIT_SUCCESS;
 }
+
+// Special thanks to Ray.
