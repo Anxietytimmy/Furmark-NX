@@ -1612,7 +1612,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
 
     // Precomp photon-sphere limits as to not process anything already done by the GPU
     float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-    float photonRadiusW = 13.0f / camDistW;
+    float photonRadiusW = 12.0f / camDistW;
 
     // add an overlap zone to resolve missing pixels
     float overlapRadius = photonRadiusW * 0.85f;
@@ -2204,7 +2204,7 @@ void BHRTRender()
     // glUniform1i(loc_h2Interval, h2UpdateInterval);
 
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-    float photonRadius = 13.0f / camDist; // shrinks as camera pulls back
+    float photonRadius = 12.0f / camDist; // shrinks as camera pulls back
 
     // Write shit for CPU
     {
