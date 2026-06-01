@@ -1147,8 +1147,8 @@ static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
 // Deflection map, resolution for CPU trace
-static const int DEFLECT_W = 320;
-static const int DEFLECT_H = 180;
+static const int DEFLECT_W = 480;
+static const int DEFLECT_H = 270;
 static GLuint s_deflectionTex;
 static GLint s_deflectionTexLoc;
 
@@ -1489,7 +1489,7 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     py = vaddq_f32(py, vmulq_f32(dy, initialStep));
     pz = vaddq_f32(pz, vmulq_f32(dz, initialStep));
 
-    for (int i = 0; i < 120; i++) {
+    for (int i = 0; i < 80; i++) {
         float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
 
         //adaptive steps so we don't waste rays
@@ -1612,7 +1612,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
 
     // Precomp photon-sphere limits as to not process anything already done by the GPU
     float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-    float photonRadiusW = 10.0f / camDistW;
+    float photonRadiusW = 13.0f / camDistW;
 
     // add an overlap zone to resolve missing pixels
     float overlapRadius = photonRadiusW * 0.85f;
@@ -2204,7 +2204,7 @@ void BHRTRender()
     // glUniform1i(loc_h2Interval, h2UpdateInterval);
 
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-    float photonRadius = 10.0f / camDist; // shrinks as camera pulls back
+    float photonRadius = 13.0f / camDist; // shrinks as camera pulls back
 
     // Write shit for CPU
     {
