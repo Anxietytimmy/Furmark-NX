@@ -1145,8 +1145,8 @@ static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
 // Deflection map 
-static const int DEFLECT_W = 160;
-static const int DEFLECT_H = 90;
+static const int DEFLECT_W = 640;
+static const int DEFLECT_H = 360;
 static GLuint s_deflectionTex;
 static GLint s_deflectionTexLoc;
 
@@ -1157,7 +1157,7 @@ alignas(64) static float s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
 
 alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
-static std::atomic<bool> s_deflectReady{false};
+static std::atomic<bool> s_deflectReady{true};
 
 // Uniforms for worker thread
 struct alignas(64) FrameUniforms {
@@ -1317,7 +1317,6 @@ float snoise_cpu(float v_x, float v_y, float v_z)
 // Make a 64^3 texture for the accretion disk
 static void buildNoise3()
 {
-    pinThread(0);
     const int N = 64;
     std::vector<uint8_t> data(N * N * N);
     for (int z = 0; z < N; z++)
@@ -1440,7 +1439,7 @@ static inline float32x4x3_t neon_accel(float32x4_t h2, float32x4_t px, float32x4
 // fuck me its RT time
 // Trace 4 rays, also outputs a texture
 // This accumulates over a curved path, since before we were tracing straight rays on a curved surface
-static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW, float* outDR, float* outDG, float* outDB, float* outDA)
+static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW, float* outDR, float* outDG, float* outDB, float* outDA, float dither)
 {
     float32x4_t px = vdupq_n_f32(cpx);
     float32x4_t py = vdupq_n_f32(cpy);
@@ -1462,6 +1461,21 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     // 1.0 still marching, terminated
     float32x4_t alive = vdupq_n_f32(1.0f);
     float32x4_t hitBH = vdupq_n_f32(0.0f);
+
+    // Dithering, rays just yoink past the disk otherwise
+    float32x4_t r2_init = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
+    float32x4_t rsqrt_r_init = vrsqrteq_f32(r2_init);
+    rsqrt_r_init = vmulq_f32(rsqrt_r_init, vrsqrtsq_f32(vmulq_f32(r2_init, rsqrt_r_init), rsqrt_r_init));
+    float32x4_t dist_init = vmulq_f32(r2_init, rsqrt_r_init);
+    
+    // Clamp initial steps.
+    float32x4_t initialStep = vminq_f32(vmaxq_f32(vmulq_n_f32(dist_init, 0.04f), vdupq_n_f32(0.02f)), vdupq_n_f32(0.3f));
+    initialStep = vmulq_n_f32(initialStep, dither);
+
+    // Apply offsets for initial rays
+    px = vaddq_f32(px, vmulq_f32(dx, initialStep));
+    py = vaddq_f32(py, vmulq_f32(dy, initialStep));
+    pz = vaddq_f32(pz, vmulq_f32(dz, initialStep));
 
     for (int i = 0; i < 250; i++) {
         float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
@@ -1581,117 +1595,107 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
 }
 
 // Deflection map creation
-static void deflectionWorkerFunc()
+static void deflectionWorkerFunc(const float camPos[3], const float view[9], float* deflectBuf, float* diskBuf)
 {
     pinThread(1);
 
-        // Track last cam position
-        float lastCamPos[3] = {1e9f, 1e9f, 1e9f};
-        // Rebuild if camera moves over 0.05 units
-        const float REBUILD_THRESHOLD = 0.05f;
+    // Precomp photon-sphere limits as to not process anything already done by the GPU
+    float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
+    float photonRadiusW = 10.0f / camDistW;
+    float photonRadiusSqW = photonRadiusW * photonRadiusW;
+    const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
 
-    while (running.load(std::memory_order_acquire))
+    // Process 4 pixels per call
+    for (int py_idx = 0; py_idx < DEFLECT_H; py_idx++)
+    for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
     {
+        // Skip areas that GPU has already worked on
+        float cv = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
+        float cu = ((px_idx + 2.0f) / DEFLECT_W - 0.5f) * aspectW;
 
-        // Read current cam position
-        float camPos[3], view[9];
+        if (cu * cu + cv * cv <= photonRadiusSqW)
         {
-            std::lock_guard<std::mutex> lk(g_uniformMutex);
-            memcpy(camPos, g_uniforms[g_uniformWriteIdx].camPos, 12);
-            memcpy(view, g_uniforms[g_uniformWriteIdx].view, 36);
-        }
-
-        // check if rebuild is required
-        float dx = camPos[0]-lastCamPos[0];
-        float dy = camPos[1]-lastCamPos[1];
-        float dz = camPos[2]-lastCamPos[2];
-        ///if (dx*dx + dy*dy + dz*dz < REBUILD_THRESHOLD * REBUILD_THRESHOLD) {
-            // if we don't need to rebuild, wait 2ms
-            // svcSleepThread(2000000ULL);
-            // continue;
-        // }
-        memcpy(lastCamPos, camPos, 12);
-        
-        int writeBuf = s_deflectReadBuf.load() ^ 1;
-        float* buf = s_deflectBuf[writeBuf];
-
-        // Precomp photon-sphere limits as to not process anything already done by the GPU
-        float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
-        float photonRadiusW = 10.0f / camDistW;
-        float photonRadiusSqW = photonRadiusW * photonRadiusW;
-        const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
-
-        // Process 4 pixels per call
-        for (int py_idx = 0; py_idx < DEFLECT_H; py_idx++)
-        for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
-        {
-            {
-                // Skip pixels which are inside the photon sphere
-                float cv = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
-                float cu = ((px_idx + 2.0f) / DEFLECT_W - 0.5f) * aspectW;
-
-                if (cu * cu + cv * cv <= photonRadiusSqW)
-                    continue;
-            }
-            // Build rays from view matrix + uv
-            float uv[4][2];
-            for (int k = 0; k < 4; k++) {
-                float u = ((px_idx + k + 0.5f) / DEFLECT_W) - 0.5f;
-                float v = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
-                // correct for aspect
-                u *= (float)DEFLECT_W / DEFLECT_H;
-                uv[k][0] = -u;
-                uv[k][1] = v;
-            }
-
-            const float fov = 1.0f;
-            float ldx[4], ldy[4], ldz[4];
-            for (int k = 0; k < 4; k++) {
-                // Local dir in cam space
-                float lx = uv[k][0] * fov;
-                float ly = uv[k][1] * fov;
-                float lz = 1.0f;
-                float len = sqrtf(lx*lx + ly*ly + lz*lz);
-
-                lx /= len;
-                ly /= len; 
-                lz /= len;
-
-                // Transform by view matrix
-                ldx[k] = view[0]*lx + view[3]*ly + view[6]*lz;
-                ldy[k] = view[1]*lx + view[4]*ly + view[7]*lz;
-                ldz[k] = view[2]*lx + view[5]*ly + view[8]*lz;
-            }
-            float32x4_t dx4 = vld1q_f32(ldx);
-            float32x4_t dy4 = vld1q_f32(ldy);
-            float32x4_t dz4 = vld1q_f32(ldz);
-
-
-            float outX[4], outY[4], outZ[4], outW[4];
-            float outDR[4], outDG[4], outDB[4], outDA[4];
-            traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW, outDR, outDG, outDB, outDA);
-
-            // write RGBA into buffer
             int base = (py_idx * DEFLECT_W + px_idx) * 4;
-            for (int k = 0; k < 4; k++) {
-                buf[base + k*4 + 0] = outX[k];
-                buf[base + k*4 + 1] = outY[k];
-                buf[base + k*4 + 2] = outZ[k];
-                buf[base + k*4 + 3] = outW[k];
 
-                // Hello my fellow at most .5% of the population that stil has a sole
-                // It is I, a wackass from an alternate universe
-                float* diskBuf = s_diskColorBuf[writeBuf];
-                diskBuf[base + k*4 + 0] = outDR[k];
-                diskBuf[base + k*4 + 1] = outDG[k];
-                diskBuf[base + k*4 + 2] = outDB[k];
-                diskBuf[base + k*4 + 3] = outDA[k];
+            for (int k = 0; k < 4; k++)
+            {
+                deflectBuf[base + k*4 + 0] = 0.0f;
+                deflectBuf[base + k*4 + 1] = 0.0f;
+                deflectBuf[base + k*4 + 2] = 0.0f;
+                deflectBuf[base + k*4 + 3] = 0.0f;
+
+                diskBuf[base + k*4 + 0] = 0.0f;
+                diskBuf[base + k*4 + 1] = 0.0f;
+                diskBuf[base + k*4 + 2] = 0.0f;
+                diskBuf[base + k*4 + 3] = 0.0f;
             }
+
+            continue;
         }
-        s_deflectReadBuf.store(writeBuf, std::memory_order_release);
-        s_deflectReady.store(true,       std::memory_order_release);
+
+        float uv[4][2];
+
+        for (int k = 0; k < 4; k++)
+        {
+            float u = ((px_idx + k + 0.5f) / DEFLECT_W) - 0.5f;
+            float v = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
+
+            u *= aspectW;
+
+            uv[k][0] = -u;
+            uv[k][1] = v;
+        }
+
+        const float fov = 1.0f;
+
+        float ldx[4], ldy[4], ldz[4];
+
+        for (int k = 0; k < 4; k++)
+        {
+            float lx = uv[k][0] * fov;
+            float ly = uv[k][1] * fov;
+            float lz = 1.0f;
+
+            float len = sqrtf(lx * lx + ly * ly + lz * lz);
+            
+            lx /= len;
+            ly /= len;
+            lz /= len;
+
+            ldx[k] = view[0]*lx + view[3]*ly + view[6]*lz;
+            ldy[k] = view[1]*lx + view[4]*ly + view[7]*lz;
+            ldz[k] = view[2]*lx + view[5]*ly + view[8]*lz;
+        }
+
+        float32x4_t dx4 = vld1q_f32(ldx);
+        float32x4_t dy4 = vld1q_f32(ldy);
+        float32x4_t dz4 = vld1q_f32(ldz);
+
+        float dither = float(((px_idx * 73) + (py_idx * 101)) % 256) / 255.0f;
+
+        float outX[4], outY[4], outZ[4], outW[4];
+        float outDR[4], outDG[4], outDB[4], outDA[4];
+
+        traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW, outDR, outDG, outDB, outDA, dither);
+
+        int base = (py_idx * DEFLECT_W + px_idx) * 4;
+
+        for (int k = 0; k < 4; k++)
+        {
+            deflectBuf[base + k*4 + 0] = outX[k];
+            deflectBuf[base + k*4 + 1] = outY[k];
+            deflectBuf[base + k*4 + 2] = outZ[k];
+            deflectBuf[base + k*4 + 3] = outW[k];
+
+            diskBuf[base + k*4 + 0] = outDR[k];
+            diskBuf[base + k*4 + 1] = outDG[k];
+            diskBuf[base + k*4 + 2] = outDB[k];
+            diskBuf[base + k*4 + 3] = outDA[k];
+        }
     }
 }
+
+
 
 // Create bloom textures
 static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
@@ -1741,7 +1745,7 @@ static void computeCamera_NEON(float t, float* outCamPos, float* outView)
 // Man we are FUCKED
 static void initTrace()
 {
-    pinThread(1);
+    // pinThread(1);
     
     float initCamPos[3], initView[9];
     computeCamera_NEON(0.0f, initCamPos, initView);
@@ -1791,7 +1795,7 @@ void BHRTSceneInit()
     GLint vsh = createAndCompileShader(GL_VERTEX_SHADER, vertexShaderSource);
     GLint fsh = createAndCompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
 
-
+    running = true;
 
     s_program = glCreateProgram();
     glAttachShader(s_program, vsh);
@@ -1868,7 +1872,7 @@ void BHRTSceneInit()
 
     glGenTextures(1, &s_deflectionTex);
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1900,7 +1904,7 @@ void BHRTSceneInit()
     glGenTextures(1, &s_diskColorTex);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2089,6 +2093,7 @@ void BHRTRender()
     }
 
     updateOrbitalLUT(t);
+    deflectionWorkerFunc(camPos, view, s_deflectBuf[0], s_diskColorBuf[0]);
 
 
     // RT + Scene
@@ -2118,11 +2123,11 @@ void BHRTRender()
     if (s_deflectReady.load(std::memory_order_acquire)) {
         int readBuf = s_deflectReadBuf.load();
         glActiveTexture(GL_TEXTURE4);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[readBuf]);
         glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[readBuf]);
         glActiveTexture(GL_TEXTURE5);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[readBuf]);
         glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[readBuf]);
         s_deflectReady.store(false, std::memory_order_release);
     }
 
@@ -2215,11 +2220,6 @@ int BHRTMain(int arcg, char* argv[])
     
     // Start our hell
     BHRTSceneInit();
-
-    // start computing on core1
-    computeCamera_NEON(getTime5(), g_uniforms[0].camPos, g_uniforms[0].view);
-    g_uniformWriteIdx.store(0);
-    s_deflectThread = std::thread(deflectionWorkerFunc);
 
     // Configure our supported input layout: a single player with standard controller styles
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
