@@ -1181,7 +1181,7 @@ void CPURBRender()
     u64 timeSinceUpdate = currentTime - s_fpsUpdateTime;
     float secondsSinceUpdate = (timeSinceUpdate * 625.0f / 12.0f) / 1000000000.0f;
     
-    if(secondsSinceUpdate >= 0.5f) {
+    if(secondsSinceUpdate >= 0.01f) {
         s_fps = s_frameCount / secondsSinceUpdate;
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;

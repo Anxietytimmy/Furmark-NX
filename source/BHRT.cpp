@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <map>
 #include <math.h>
+#include <chrono>
 
 #define GLM_FORCE_PURE
 #include <glm/vec3.hpp>
@@ -1161,6 +1162,10 @@ alignas(64) static float s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::thread s_deflectThreads[2];
 static std::atomic<uint32_t> s_targetFrame{0};
 static std::atomic<int> s_threadsFinished{0};
+// CPU Side FPS Counter
+static std::chrono::time_point<std::chrono::high_resolution_clock> s_frameStartTime;
+static std::atomic<float> s_currentCpuFps{0.0f};
+static std::atomic<float> s_lastCpuLatencyMs{0.0f};
 
 alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
@@ -1713,7 +1718,43 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
     }
 }
 
+static void CPU_FPS_Start()
+{
+    // check if exit is in progress and if so, don't continue
+    if (!running.load(std::memory_order_acquire)) return;
 
+    s_frameStartTime = std::chrono::high_resolution_clock::now();
+}
+
+static void CPU_FPS_End()
+{
+    static auto lastFpsTime = std::chrono::high_resolution_clock::now();
+    static int frameCount = 0;
+    static float timeAccumulator = 0.0f;
+
+    auto now = std::chrono::high_resolution_clock::now();
+
+    // Calculate exact time for current frame
+    float latency = std::chrono::duration<float>(now - s_frameStartTime).count();
+    s_lastCpuLatencyMs.store(latency * 1000.0f, std::memory_order_release);
+
+    // Calc overall FPS
+    float deltaFps = std::chrono::duration<float>(now - lastFpsTime).count();
+    lastFpsTime = now;
+
+    frameCount++;
+    timeAccumulator += deltaFps;
+
+    // Refresh every 10ms
+    if (timeAccumulator >= 0.01f) 
+    {
+        float fps = static_cast<float>(frameCount) / timeAccumulator;
+        s_currentCpuFps.store(fps, std::memory_order_release);
+        
+        frameCount = 0;
+        timeAccumulator = 0.0f;
+    }
+}
 
 // Create bloom textures
 static void makeFbo(GLuint& fbo, GLuint& tex, int w, int h)
@@ -1848,6 +1889,9 @@ static void deflectThreadFunc(int threadIdx, int coreID)
         // as we cross the space and time
         if (s_threadsFinished.fetch_add(1, std::memory_order_acq_rel) == 1)
         {
+            // Stop FPS timer
+            CPU_FPS_End();
+
             // Just stay with me
             // GPU handoff
             s_deflectReadBuf.store(writeIdx, std::memory_order_release);
@@ -2139,7 +2183,7 @@ void BHRTRender()
     u64 timeSinceUpdate = currentTime - s_fpsUpdateTime;
     float secondsSinceUpdate = (timeSinceUpdate * 625.0f / 12.0f) / 1000000000.0f;
     
-    if(secondsSinceUpdate >= 0.5f) {
+    if(secondsSinceUpdate >= 0.01f) {
         s_fps = s_frameCount / secondsSinceUpdate;
         s_frameCount = 0;
         s_fpsUpdateTime = currentTime;
@@ -2172,6 +2216,9 @@ void BHRTRender()
         g_uniformWriteIdx.store(wi, std::memory_order_release);
         s_targetFrame.fetch_add(1, std::memory_order_release);
     }
+
+    // Start CPU counter
+    CPU_FPS_Start();
 
     // Notify 
     // All of my life
@@ -2273,7 +2320,11 @@ void BHRTRender()
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
-    drawText(fpsText, - 0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+    drawText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+
+    char CPUFPS[64];
+    snprintf(CPUFPS, sizeof(CPUFPS), "%.3f", s_currentCpuFps.load(std::memory_order_acquire));
+    drawText(CPUFPS, 0.10f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 
     // flip for next frame
     s_frameIndex ^= 1;
