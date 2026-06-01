@@ -2324,7 +2324,7 @@ void BHRTRender()
 
     char CPUFPS[64];
     snprintf(CPUFPS, sizeof(CPUFPS), "%.3f", s_currentCpuFps.load(std::memory_order_acquire));
-    drawText(CPUFPS, 0.10f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+    drawText(CPUFPS, 0.00f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
 
     // flip for next frame
     s_frameIndex ^= 1;
