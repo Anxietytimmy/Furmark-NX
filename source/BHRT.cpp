@@ -1144,9 +1144,9 @@ static int    s_frameIndex = 0;
 static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
-// Deflection map 
-static const int DEFLECT_W = 640;
-static const int DEFLECT_H = 360;
+// Deflection map, resolution for CPU trace
+static const int DEFLECT_W = 160;
+static const int DEFLECT_H = 90;
 static GLuint s_deflectionTex;
 static GLint s_deflectionTexLoc;
 
@@ -1477,7 +1477,7 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     py = vaddq_f32(py, vmulq_f32(dy, initialStep));
     pz = vaddq_f32(pz, vmulq_f32(dz, initialStep));
 
-    for (int i = 0; i < 250; i++) {
+    for (int i = 0; i < 120; i++) {
         float32x4_t r2 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
 
         //adaptive steps so we don't waste rays
@@ -1616,7 +1616,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
         if (cu * cu + cv * cv <= photonRadiusSqW)
         {
             int base = (py_idx * DEFLECT_W + px_idx) * 4;
-
+            // Write zeros as init
             for (int k = 0; k < 4; k++)
             {
                 deflectBuf[base + k*4 + 0] = 0.0f;
@@ -1633,6 +1633,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
             continue;
         }
 
+        // build rays from view matrix
         float uv[4][2];
 
         for (int k = 0; k < 4; k++)
@@ -1640,6 +1641,8 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
             float u = ((px_idx + k + 0.5f) / DEFLECT_W) - 0.5f;
             float v = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
 
+            // aspect correction, technically this only works if both pipelines are the same aspect
+            // I want you to tell me in what fucking universe you'd have a 21:9/ 4:3 split
             u *= aspectW;
 
             uv[k][0] = -u;
@@ -1652,6 +1655,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
 
         for (int k = 0; k < 4; k++)
         {
+            // Local directions in camera space
             float lx = uv[k][0] * fov;
             float ly = uv[k][1] * fov;
             float lz = 1.0f;
@@ -1662,6 +1666,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
             ly /= len;
             lz /= len;
 
+            // apply transforms
             ldx[k] = view[0]*lx + view[3]*ly + view[6]*lz;
             ldy[k] = view[1]*lx + view[4]*ly + view[7]*lz;
             ldz[k] = view[2]*lx + view[5]*ly + view[8]*lz;
@@ -1676,12 +1681,16 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
         float outX[4], outY[4], outZ[4], outW[4];
         float outDR[4], outDG[4], outDB[4], outDA[4];
 
+        // Call this downer of a function, what the actual fuck was I smoking
         traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW, outDR, outDG, outDB, outDA, dither);
 
         int base = (py_idx * DEFLECT_W + px_idx) * 4;
 
+        // Hello my fellow at most .5% of the population that stil has a sole
+        // It is I, that one guy that thought copy and pasting libraries into shaders was funny
         for (int k = 0; k < 4; k++)
         {
+            // Write RGBA data back
             deflectBuf[base + k*4 + 0] = outX[k];
             deflectBuf[base + k*4 + 1] = outY[k];
             deflectBuf[base + k*4 + 2] = outZ[k];
