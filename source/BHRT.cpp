@@ -1146,8 +1146,8 @@ static GLuint s_noiseTex3D;
 static GLint s_noiseTexLoc;
 
 // Deflection map, resolution for CPU trace
-static const int DEFLECT_W = 160;
-static const int DEFLECT_H = 90;
+static const int DEFLECT_W = 320;
+static const int DEFLECT_H = 180;
 static GLuint s_deflectionTex;
 static GLint s_deflectionTexLoc;
 
@@ -1155,6 +1155,12 @@ static GLint s_deflectionTexLoc;
 static GLuint s_diskColorTex;
 static GLint s_diskColorTexLoc;
 alignas(64) static float s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
+
+// speaking of which
+// Thread variables for CPU, as the 160x90 field runs on the CPU
+static std::thread s_deflectThreads[2];
+static std::atomic<uint32_t> s_targetFrame{0};
+static std::atomic<int> s_threadsFinished{0};
 
 alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
@@ -1596,9 +1602,8 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
 }
 
 // Deflection map creation
-static void deflectionWorkerFunc(const float camPos[3], const float view[9], float* deflectBuf, float* diskBuf)
+static void deflectionWorkerFunc(const float camPos[3], const float view[9], float* deflectBuf, float* diskBuf, int startY, int endY)
 {
-    pinThread(1);
 
     // Precomp photon-sphere limits as to not process anything already done by the GPU
     float camDistW = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
@@ -1802,6 +1807,61 @@ static void initTrace()
 
 }
 
+// When I wake up, Im afraid
+// Somebody else will take my place
+
+// Worker thread for tracer
+static void deflectThreadFunc(int threadIdx, int coreID)
+{
+    // Pin thread to core 1/2
+    pinThread(coreID);
+
+    uint32_t localFrame = 0;
+
+    while (running.load(std::memory_order_acquire))
+    {
+        // wait for main to ask for a frame
+        {
+            std::unique_lock<std::mutex> lock(workMutex);
+            workCV.wait(lock, [&] { return s_targetFrame.load(std::memory_order_acquire) > localFrame || !running.load(std::memory_order_acquire); });
+        }
+
+        if (!running.load(std::memory_order_acquire)) break;
+
+        localFrame = s_targetFrame.load(std::memory_order_acquire);
+
+        // Read uniforms
+        int readIdx = g_uniformWriteIdx.load(std::memory_order_acquire);
+        int writeIdx = s_deflectReadBuf.load(std::memory_order_acquire) ^ 1;
+
+        // Split the screen horizontally, then assign work accordingly
+        int halfHeight = DEFLECT_H / 2;
+        int startY = halfHeight * threadIdx;
+        int endY = startY + halfHeight;
+
+        // Will I ever see you again?
+        // Start CPU
+        deflectionWorkerFunc(g_uniforms[readIdx].camPos, g_uniforms[readIdx].view, s_deflectBuf[writeIdx], s_diskColorBuf[writeIdx], startY, endY);
+
+        // sync and handoff
+        // Someday
+        // as we cross the space and time
+        if (s_threadsFinished.fetch_add(1, std::memory_order_acq_rel) == 1)
+        {
+            // Just stay with me
+            // GPU handoff
+            s_deflectReadBuf.store(writeIdx, std::memory_order_release);
+            s_deflectReady.store(true, std::memory_order_release);
+
+            // Reset finished flag for the next frame
+            s_threadsFinished.store(0, std::memory_order_release);
+            // I think about you all the time.
+        }
+    }
+
+}
+
+
 void BHRTSceneInit()
 {
     pinThread(0);
@@ -1895,6 +1955,11 @@ void BHRTSceneInit()
 
 
     glUseProgram(s_program);
+
+    // Launch CPU1
+    s_deflectThreads[0] = std::thread(deflectThreadFunc, 0, 1);
+    // Launch CPU2
+    s_deflectThreads[1] = std::thread(deflectThreadFunc, 1, 2);
 
     loc_camPos = glGetUniformLocation(s_program, "camPos");
     loc_view = glGetUniformLocation(s_program, "view");
@@ -2097,10 +2162,26 @@ void BHRTRender()
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
     float photonRadius = 10.0f / camDist; // shrinks as camera pulls back
 
+    // Write shit for CPU
+    {
+        std::lock_guard<std::mutex> lk(workMutex); 
+        int wi = g_uniformWriteIdx.load(std::memory_order_acquire) ^ 1;
+        memcpy(g_uniforms[wi].camPos, camPos, sizeof(camPos));
+        memcpy(g_uniforms[wi].view, view, sizeof(view));
+        
+        g_uniformWriteIdx.store(wi, std::memory_order_release);
+        s_targetFrame.fetch_add(1, std::memory_order_release);
+    }
+
+    // Notify 
+    // All of my life
+    workCV.notify_all();
+
+
     updateOrbitalLUT(t);
-    deflectionWorkerFunc(camPos, view, s_deflectBuf[0], s_diskColorBuf[0]);
 
 
+    // We'll never change
     // RT + Scene
     glBindFramebuffer(GL_FRAMEBUFFER, s_sceneFbo);
     glViewport(0, 0, 1280, 720);
@@ -2120,14 +2201,17 @@ void BHRTRender()
     glBindTexture(GL_TEXTURE_2D, s_orbitalLUTTex);
     glUniform1f(loc_time, t);
     glUniform2f(resloc, RenderX, RenderY);
+    // all of our days
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
     glActiveTexture(GL_TEXTURE5);
+    // Show me the wave
     glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    // All the waves
 
     // Resolve checkerboard
     glBindFramebuffer(GL_FRAMEBUFFER, s_prevSceneFbo);
@@ -2141,6 +2225,7 @@ void BHRTRender()
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     // Brightness to bloom
+    // All the life with you
     glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboA);
     glViewport(0, 0, BLOOM_W, BLOOM_H);
     glUseProgram(s_bloomExtractProg);
@@ -2149,8 +2234,10 @@ void BHRTRender()
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     // Actual blur, setup iterations
+    // Riding your wave
     glUseProgram(s_bloomBlurProg);
     const int BLUR_ITERATIONS = 8;
+    // wrapped in your colors
     for (int i = 0; i < BLUR_ITERATIONS; i++) {
         // A -> B Horizontal
         glBindFramebuffer(GL_FRAMEBUFFER, s_bloomFboB);
@@ -2168,6 +2255,7 @@ void BHRTRender()
     }
 
     // compose -> scene
+    // With your arms, over my head.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, 1280, 720);
     glUseProgram(s_bloomCompositeProg);
@@ -2176,8 +2264,12 @@ void BHRTRender()
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, s_bloomTexA);
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    // Cross the shallows
+    // keep my balance
+    // Cross the shallows, all of my life
 
     // Fps
+    // hold my diamond, well never change
     glBindVertexArray(0);
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
@@ -2185,12 +2277,15 @@ void BHRTRender()
 
     // flip for next frame
     s_frameIndex ^= 1;
+    // Riding your wave
 
 }
 
 void BHRTExit()
 {
     cleanupTextRenderer();
+    // Kept me, kept me
+    // Clam
     glDeleteFramebuffers(1, &s_prevSceneFbo);
     glDeleteTextures(1, &s_prevSceneTex);
     glDeleteProgram(s_resolveProg);
@@ -2198,6 +2293,19 @@ void BHRTExit()
     glDeleteVertexArrays(1, &s_vao);
     glDeleteProgram(s_program);
     glDeleteTextures(1, &s_orbitalLUTTex);
+
+    // Stop CPU
+    // With your arms
+    // Over my head.
+    running.store(false, std::memory_order_release);
+    workCV.notify_all(); // If the thread conked out, tell it to lock in
+
+    // monster
+    // da drink
+    if (s_deflectThreads[0].joinable()) s_deflectThreads[0].join();
+    if (s_deflectThreads[1].joinable()) s_deflectThreads[1].join();
+
+    // That was fun.
 }
 
 int BHRTMain(int arcg, char* argv[])
