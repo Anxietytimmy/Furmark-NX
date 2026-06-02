@@ -4,7 +4,7 @@
 Heavily based off [Furmark by StanislavPetrovV](https://github.com/StanislavPetrovV/FurMark/tree/main})
 
 - A Stress Testing Utility for the Nintendo Switch.
-- This tool currently has 4 stress tests avaliable, with 2 more in development.
+- This tool currently has 6 stress tests avaliable, with work on a proper UI and Deko3D ports started.
 - Given its purpose, if used on high enough clockspeeds and timespans, this will cause hardware damage.
 - While Furmark can be used to find instability, it is generally not good at it and thus will only crash once much larger issues are present.
 
