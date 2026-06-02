@@ -143,6 +143,8 @@ static bool initEgl(NWindow* win)
 
     // Connect the context to the surface
     eglMakeCurrent(s_display, s_surface, s_surface, s_context);
+    // Make frames present instantly instead of waiting for vsync
+    eglSwapInterval(s_display, 0);
     return true;
 
 _fail2:
@@ -316,7 +318,7 @@ static void cleanupTextRenderer() {
 static void setMesaConfig()
 {
     // Uncomment below to disable error checking and save CPU time (useful for production):
-    //setenv("MESA_NO_ERROR", "1", 1);
+    setenv("MESA_NO_ERROR", "1", 1);
 
     // Uncomment below to enable Mesa logging:
     //setenv("EGL_LOG_LEVEL", "debug", 1);
@@ -326,7 +328,7 @@ static void setMesaConfig()
     // Uncomment below to enable shader debugging in Nouveau:
     //setenv("NV50_PROG_OPTIMIZE", "0", 1);
     //setenv("NV50_PROG_DEBUG", "1", 1);
-    setenv("NV50_PROG_CHIPSET", "0x120", 1);
+    setenv("NV50_PROG_CHIPSET", "0", 1);
 }
     // vertex shader just to get anything on screen
 static const char* const vertexShaderSource = R"text(

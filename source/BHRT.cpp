@@ -936,7 +936,7 @@ static const char* const fragmentShaderSource = R"text(
         pos += dir * (initialStep * dither);
 
         // Ray iterations count
-        for (int i = 0; i < 250; i++) {
+        for (int i = 0; i < 320; i++) {
             // Dynamically change steps taken based on distance from the black hole
             float dist = length(pos);
             float stepSize = clamp(dist * 0.04, 0.02, 0.3);
