@@ -490,6 +490,8 @@ static const char* const fragmentShaderSource = R"text(
     }
 )text";
 
+
+
 static GLuint s_program;
 static GLuint s_vao, s_vbo;
 // needed for shader to render onscreen
