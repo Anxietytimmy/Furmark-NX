@@ -30,6 +30,15 @@ Heavily based off [Furmark by StanislavPetrovV](https://github.com/StanislavPetr
 - Rays bounce 3 times before stopping.
 - The image is then constantly sampled to denoise.
 
+## CPU + GPU Black Hole
+![BHRT Screenshot](/Screenshots/BHRT.png)
+- This uses both the CPU and GPU to render a black hole with an accretion disk and skybox.
+- The GPU renders the inner region of the frame, with a 320 step ray tracer for gravitaional lensing around the black hole and accretion disk
+- This is rendered at 1280x720, with a procedural star field in the background, and bloom opperating at 160x90.
+- A final checkerboard pass is then used to discard repeat pixels.
+- CPU uses 2 threads to trace 80 steps through the outer region at 480x270.
+- Both pipelines act independently, with two seperate frame rate meters.
+
 ## CPU Ray Tracing
 ![CPURT Sceenshot](/Screenshots/CPUPT.png)
 
@@ -38,3 +47,11 @@ Heavily based off [Furmark by StanislavPetrovV](https://github.com/StanislavPetr
 - This test heavily uses NEON piplines while using the GPU to display the final image.
 - This runs on all avaliable threads (3) on stock atmosphere.
 - Denoising is similar to GPUPT.
+
+## CPU RAM Stress
+![CPURB Screenshot](/Screenshots/CPURB.png)
+
+- This is a modified version of CPURT, now stressing memory.
+- Rendering resolution is reduced to 640x360.
+- This test uses 4 FBOs and constantly copies between them, stressing memory.
+- Results are about 50-28% as good as GPURT depending on clockspeeds.
