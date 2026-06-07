@@ -140,6 +140,8 @@ static bool initEgl(NWindow* win)
 
     // Connect the context to the surface
     eglMakeCurrent(s_display, s_surface, s_surface, s_context);
+    // Disable VSync
+    eglSwapInterval(s_display, 0);
     return true;
 
 _fail2:
@@ -313,16 +315,16 @@ static void cleanupTextRenderer() {
 static void setMesaConfig()
 {
     // Uncomment below to disable error checking and save CPU time (useful for production):
-    //setenv("MESA_NO_ERROR", "1", 1);
+    setenv("MESA_NO_ERROR", "1", 1);
 
     // Uncomment below to enable Mesa logging:
-    setenv("EGL_LOG_LEVEL", "debug", 1);
-    setenv("MESA_VERBOSE", "all", 1);
-    setenv("NOUVEAU_MESA_DEBUG", "1", 1);
+    // setenv("EGL_LOG_LEVEL", "debug", 1);
+    // setenv("MESA_VERBOSE", "all", 1);
+    // setenv("NOUVEAU_MESA_DEBUG", "1", 1);
 
     // Uncomment below to enable shader debugging in Nouveau:
     setenv("NV50_PROG_OPTIMIZE", "0", 1);
-    setenv("NV50_PROG_DEBUG", "1", 1);
+    // setenv("NV50_PROG_DEBUG", "1", 1);
     setenv("NV50_PROG_CHIPSET", "0x120", 1);
 }
     // vertex shader just to get anything on screen
@@ -382,8 +384,15 @@ static const char* const fragmentShaderSource = R"text(
     // RANDOM
     // --------------------------------------------------
 
+    // Changed to 3 XORS, 3 MUL, and 2 Shifts
     float hash(vec2 p){
-        return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);
+        uvec2 q = uvec2(floatBitsToUint(p.x), floatBitsToUint(p.y));
+        q.x ^= q.y * 1664525u + 1013904223u;
+        q.x *= 1664525u; q.x += 1013904223u;
+        q.x ^= q.x >> 16u;
+        q.x *= 0x45d9f3bu;
+        q.x ^= q.x >> 16u;
+        return float(q.x) * (1.0 / 4294967296.0);
     }
 
     vec3 rand3(vec3 p){
@@ -554,16 +563,27 @@ static const char* const fragmentShaderSource = R"text(
             if(isMirror(h.material)){
                 rd = reflect(rd, n);
             }
-            else{
-                // diffuse bounce (hemisphere)
+            
+            // Change to Oren-Nayar instead of Lambertain
+            // Gives us better visual quality while increasing power draw slightly
+            if(!isMirror(h.material)) {
                 vec3 r = rand3(pos + float(bounce) + float(u_frame));
                 rd = normalize(n + r);
-                // cosine weighting (energy can only be transfered)
-                // I mean if you want to change this sure, but you'll get flashbanged.
 
-                float cosTheta = max(dot(rd, n), 0.0);
+                float nl = max(dot(rd, n), 0.0);
+                float nv = max(dot(-rd, n), 0.0);
+                float rough = 0.7;
+                float sigma2 = rough * rough;
+                float A = 1.0 - 0.5 * sigma2 / (sigma2 + 0.33);
+                float B = 0.45 * sigma2 / (sigma2 + 0.09);
+                float thetaL = acos(nl);
+                float thetaV = acos(nv);
+                float alpha = max(thetaL, thetaV);
+                float beta = min(thetaL, thetaV);
+                float cosPhiDiff = max(dot(normalize(rd - n * nl), normalize(-rd - n * nv)), 0.0);
+                float oren = nl * (A + B * cosPhiDiff * sin(alpha) * tan(beta));
 
-                throughput *= getColor(h.material) * cosTheta;
+                throughput *= getColor(h.material) * oren;
             }
 
             ro = pos + n*0.001;
@@ -605,16 +625,17 @@ static const char* const fragmentShaderSource = R"text(
     {
         //setup output
         vec2 uv = gl_FragCoord.xy / u_resolution;
-        vec3 newSample = pathTrace(uv);
+        vec3 newSample = vec3(0.0);
+        // Samples per pixel
+        const int SPP = 1;
+        for (int s = 0; s < SPP; s++) {
+            newSample += pathTrace(uv + vec2(float(s) * 0.37, float(s) * 0.61));
+        }
+        newSample /= float(SPP);
 
         // Accumulation
         vec3 prev = texture(u_prevFrame, gl_FragCoord.xy / u_resolution).rgb;
-        vec3 accumulated;
-
-        if(u_frame == 0)
-            accumulated = newSample;
-        else
-            accumulated = (prev *float(u_frame) + newSample) / float(u_frame + 1);
+        vec3 accumulated = (u_frame == 0) ? newSample : (prev * float(u_frame) + newSample) / float(u_frame + 1);
 
 
         // Output final pixels, send to vertex
