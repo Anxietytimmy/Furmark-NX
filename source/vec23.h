@@ -307,7 +307,7 @@ inline void buildONB4(const vec3x4& n, vec3x4& t, vec3x4& b){
     float32x4_t bc = vmulq_f32(vmulq_f32(n.x, n.y), a);
 
     // tan = (1 + sign*nx²*a,  sign*bcoef,  -sign*nx)
-    t.x = vaddq_f32(one, vmulq_f32(sgn, vmulq_f32(vmulq_f32(n.x, n.y), a)));
+    t.x = vaddq_f32(one, vmulq_f32(sgn, vmulq_f32(vmulq_f32(n.x, n.x), a)));
     t.y = vmulq_f32(sgn, bc);
     t.z = vnegq_f32(vmulq_f32(sgn, n.x));
 
