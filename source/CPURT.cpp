@@ -593,7 +593,7 @@ inline void intersectScene4(const vec3x4& ro, const vec3x4& rd, float32x4_t& t, 
 // We process 2 packets of 4 rays together, with post intersection ops interleaved.
 // This means that A57 can see the dependency chains and dual issue is triggered.
 
-inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f out0[4], vec3f out1[4], uint32x4_t rng0, uint32x4_t rng1)
+inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3x4& out0, vec3x4& out1, uint32x4_t rng0, uint32x4_t rng1)
 {
     vec3x4 color0, color1;
     color0.x = color0.y = color0.z = vdupq_n_f32(0.0f);
@@ -720,21 +720,10 @@ inline void trace8(vec3x4 ro0, vec3x4 rd0, vec3x4 ro1, vec3x4 rd1, vec3f out0[4]
         ro1.z = vmlaq_f32(pos1.z, n1.z, BIAS);
     }
 
-    // unpack results
-    float cr0[4], cg0[4], cb0[4];
-    float cr1[4], cg1[4], cb1[4];
-    vst1q_f32(cr0, color0.x);
-    vst1q_f32(cg0, color0.y);
-    vst1q_f32(cb0, color0.z);
-    vst1q_f32(cr1, color1.x);
-    vst1q_f32(cg1, color1.y);
-    vst1q_f32(cb1, color1.z);
-
-    for (int i = 0; i < 4; i++)
-    {
-        out0[i] = { cr0[i], cg0[i], cb0[i] };
-        out1[i] = { cr1[i], cg1[i], cb1[i] };
-    }
+    
+    // output directly
+    out0 = color0;
+    out1 = color1;
 }
 
 static vec3f camForward;
@@ -835,8 +824,8 @@ void renderTile(int startY, int endY, int frameIndex)
         rng0 = vmlaq_u32(vC, rng0, vA);
         rng1 = vmlaq_u32(vC, rng1, vA);
 
-        vec3f col0[4], col1[4];
-        trace8(ro0, rd0, ro1, rd1, col0, col1, rng0, rng1);
+        vec3x4 vcol0, vcol1;
+        trace8(ro0, rd0, ro1, rd1, vcol0, vcol1, rng0, rng1);
 
         // Accumulate into FB
         // coca cloa espuma 
@@ -850,26 +839,20 @@ void renderTile(int startY, int endY, int frameIndex)
         float32x4x4_t vFB0 = vld4q_f32(fbPtr0);
         float32x4x4_t vFB1 = vld4q_f32(fbPtr1);
 
-        // convert col into new registers
-        // TBH it would be alot better to have trace8 return these as vectors, but I am lazy
-        float32x4_t vNewR0 = {col0[0].x, col0[1].x, col0[2].x, col0[3].x};
-        float32x4_t vNewG0 = {col0[0].y, col0[1].y, col0[2].y, col0[3].y};
-        float32x4_t vNewB0 = {col0[0].z, col0[1].z, col0[2].z, col0[3].z};
-        float32x4_t vNewR1 = {col1[0].x, col1[1].x, col1[2].x, col1[3].x};
-        float32x4_t vNewG1 = {col1[0].y, col1[1].y, col1[2].y, col1[3].y};
-        float32x4_t vNewB1 = {col1[0].z, col1[1].z, col1[2].z, col1[3].z};
+        // That took like 5 minuites to implement I probably was sleep deprived or something
+
 
         // actually accumulate this time
-        vFB0.val[0] = vfmaq_f32(vFB0.val[0], vsubq_f32(vNewR0, vFB0.val[0]), vScale);
-        vFB0.val[1] = vfmaq_f32(vFB0.val[1], vsubq_f32(vNewG0, vFB0.val[1]), vScale);
-        vFB0.val[2] = vfmaq_f32(vFB0.val[2], vsubq_f32(vNewB0, vFB0.val[2]), vScale);
+        vFB0.val[0] = vfmaq_f32(vFB0.val[0], vsubq_f32(vcol0.x, vFB0.val[0]), vScale);
+        vFB0.val[1] = vfmaq_f32(vFB0.val[1], vsubq_f32(vcol0.y, vFB0.val[1]), vScale);
+        vFB0.val[2] = vfmaq_f32(vFB0.val[2], vsubq_f32(vcol0.z, vFB0.val[2]), vScale);
         vFB0.val[3] = vOne;
 
         // HA HA 
         // O N E
-        vFB1.val[0] = vfmaq_f32(vFB1.val[0], vsubq_f32(vNewR1, vFB1.val[0]), vScale);
-        vFB1.val[1] = vfmaq_f32(vFB1.val[1], vsubq_f32(vNewG1, vFB1.val[1]), vScale);
-        vFB1.val[2] = vfmaq_f32(vFB1.val[2], vsubq_f32(vNewB1, vFB1.val[2]), vScale);
+        vFB1.val[0] = vfmaq_f32(vFB1.val[0], vsubq_f32(vcol1.x, vFB1.val[0]), vScale);
+        vFB1.val[1] = vfmaq_f32(vFB1.val[1], vsubq_f32(vcol1.y, vFB1.val[1]), vScale);
+        vFB1.val[2] = vfmaq_f32(vFB1.val[2], vsubq_f32(vcol1.z, vFB1.val[2]), vScale);
         vFB1.val[3] = vOne;
 
         // Blast back into memory
