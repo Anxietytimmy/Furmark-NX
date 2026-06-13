@@ -154,6 +154,7 @@ static bool initEgl(NWindow* win)
 
     // Connect the context to the surface
     eglMakeCurrent(s_display, s_surface, s_surface, s_context);
+    eglSwapInterval(s_display, 0);
     return true;
 
 _fail2:
