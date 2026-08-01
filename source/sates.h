@@ -5,7 +5,8 @@ enum AppState {
     STATE_GPU_PT,
     STATE_BH_RT,
     STATE_CPU_RT,
-    STATE_CPU_RB
+    STATE_CPU_RB,
+    STATE_FURMARK_DEKO
 };
 
 extern AppState state;
