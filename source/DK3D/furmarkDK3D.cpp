@@ -77,6 +77,14 @@ static dk::UniqueSwapchain s_swapchain;
 static dk::UniqueCmdBuf s_cmdbuf;
 static dk::UniqueMemBlock s_cmdbufMemBlock;
 
+// Sharing memory is mid but it causes issues like having to wait for the CPU or GPU to sync to each other
+// That basically leads to random stalls because this is dumb.
+// So instead we allocate an extra buffer so any needed swapchain ops can run on a different buffer
+static dk::UniqueCmdBuf s_renderCmdbufs[NUM_FRAMEBUFFERS];
+static dk::UniqueMemBlock s_renderCmdbufMemBlocks[NUM_FRAMEBUFFERS];
+static dk::Fence s_frameFences[NUM_FRAMEBUFFERS];
+static bool s_frameFenceValid[NUM_FRAMEBUFFERS] = { false, false };
+
 static dk::Image s_framebuffers[NUM_FRAMEBUFFERS];
 static dk::UniqueMemBlock s_fbMemBlock;
 
@@ -206,12 +214,23 @@ void frdSceneInit()
     s_device = dk::DeviceMaker{}.create();
     s_queue = dk::QueueMaker{s_device}.setFlags(DkQueueFlags_Graphics).create();
 
-    // CMD Buffer
+    // CMD Buffer (only used once now)
     s_cmdbufMemBlock = dk::MemBlockMaker{s_device, CMDBUF_SIZE}
         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)
         .create();
     s_cmdbuf = dk::CmdBufMaker{s_device}.create();
     s_cmdbuf.addMemory(s_cmdbufMemBlock, 0, CMDBUF_SIZE);
+
+    // One command buffer per swapchain slot for the actual render loop
+    for (unsigned i = 0; i < NUM_FRAMEBUFFERS; i++)
+    {
+        s_renderCmdbufMemBlocks[i] = dk::MemBlockMaker{s_device, CMDBUF_SIZE}
+            .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)
+            .create();
+        s_renderCmdbufs[i] = dk::CmdBufMaker{s_device}.create();
+        s_renderCmdbufs[i].addMemory(s_renderCmdbufMemBlocks[i], 0, CMDBUF_SIZE);
+    }
+
 
     // Swapchain buffers
     dk::ImageLayout fbLayout;
@@ -267,6 +286,13 @@ void frdSceneInit()
     s_tex2 = loadTexture(noise_png, noise_png_size, 1);
     s_tex3 = loadTexture(wall_png, wall_png_size, 2);
 
+    // Bind descriptors in this spot, only done at init and flush here.
+    s_cmdbuf.bindImageDescriptorSet(s_imageDescMemBlock.getGpuAddr(), 3);
+    s_cmdbuf.bindSamplerDescriptorSet(s_samplerDescMemBlock.getGpuAddr(), 3);
+    s_queue.submitCommands(s_cmdbuf.finishList());
+    s_queue.waitIdle();
+
+
     // Reserve UBO Space
     s_uboOffset = s_dataPoolOffset;
     s_dataPoolOffset += s_uboSize;
@@ -296,6 +322,14 @@ void frdRender()
 
     int slot = s_queue.acquireImage(s_swapchain);
 
+    // IF this slot's frame is still in use for some goddamn reason, then wait
+    // We could do without this check but if a cosmic ray tells me to go fuck myself then we need this to not hang
+    if (s_frameFenceValid[slot])
+        s_frameFences[slot].wait();
+
+    dk::CmdBuf& cmdbuf = s_renderCmdbufs[slot];
+
+
     // Write frame uniforms
     FurParams params;
     params.u_resolution[0] = (float)FB_WIDTH;
@@ -304,9 +338,6 @@ void frdRender()
     memcpy((uint8_t*)s_dataPool.getCpuAddr() + s_uboOffset, &params, sizeof(params));
 
     s_cmdbuf.clear();
-
-    s_cmdbuf.bindImageDescriptorSet(s_imageDescMemBlock.getGpuAddr(), 3);
-    s_cmdbuf.bindSamplerDescriptorSet(s_samplerDescMemBlock.getGpuAddr(), 3);
 
     dk::ImageView fbView{s_framebuffers[slot]};
     s_cmdbuf.bindRenderTargets(&fbView);
@@ -333,21 +364,30 @@ void frdRender()
     // Draw this as a triangle
     s_cmdbuf.draw(DkPrimitive_Triangles, 3, 1, 0, 0);
 
+    // Signal that this slot is fine to overwrite
+    cmdbuf.signalFence(s_frameFences[slot]);
+    s_frameFenceValid[slot] = true;
+
     s_queue.submitCommands(s_cmdbuf.finishList());
     s_queue.presentImage(s_swapchain, slot);
 
-    // So funny story, we need to wait for the GPU for this to work.
-    // Can we kind of go around this, yes, can I care right now? no.
-    // So we just have to wait for an idle so memory doesn't get overwritten
-    s_queue.waitIdle();
 
     // OH BROTHER THIS GUY STINKS
     (void)s_fps;
 }
 void frdExit()
 {
+
+
     s_queue.waitIdle();
     s_cmdbuf.destroy();
+    for (unsigned i = 0; i < NUM_FRAMEBUFFERS; i++)
+    {
+        s_renderCmdbufs[i].destroy();
+        s_renderCmdbufMemBlocks[i].destroy();
+        s_frameFenceValid[i] = false;
+    }
+
     s_swapchain.destroy();
     s_fbMemBlock.destroy();
     s_imagePool.destroy();
