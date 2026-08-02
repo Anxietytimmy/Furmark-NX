@@ -252,9 +252,6 @@ void frdSceneInit()
     s_tex2 = loadTexture(noise_png, noise_png_size, 1);
     s_tex3 = loadTexture(wall_png, wall_png_size, 2);
 
-    s_cmdbuf.bindImageDescriptorSet(s_imageDescMemBlock.getGpuAddr(), 3);
-    s_cmdbuf.bindSamplerDescriptorSet(s_samplerDescMemBlock.getGpuAddr(), 3);
-
     // Reserve UBO Space
     s_uboOffset = s_dataPoolOffset;
     s_dataPoolOffset += s_uboSize;
@@ -293,6 +290,9 @@ void frdRender()
 
     s_cmdbuf.clear();
 
+    s_cmdbuf.bindImageDescriptorSet(s_imageDescMemBlock.getGpuAddr(), 3);
+    s_cmdbuf.bindSamplerDescriptorSet(s_samplerDescMemBlock.getGpuAddr(), 3);
+
     dk::ImageView fbView{s_framebuffers[slot]};
     s_cmdbuf.bindRenderTargets(&fbView);
 
@@ -320,6 +320,11 @@ void frdRender()
 
     s_queue.submitCommands(s_cmdbuf.finishList());
     s_queue.presentImage(s_swapchain, slot);
+
+    // So funny story, we need to wait for the GPU for this to work.
+    // Can we kind of go around this, yes, can I care right now? no.
+    // So we just have to wait for an idle so memory doesn't get overwritten
+    s_queue.waitIdle();
 
     // OH BROTHER THIS GUY STINKS
     (void)s_fps;
