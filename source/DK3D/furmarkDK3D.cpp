@@ -231,6 +231,9 @@ void frdSceneInit()
         s_renderCmdbufs[i].addMemory(s_renderCmdbufMemBlocks[i], 0, CMDBUF_SIZE);
     }
 
+    // Da creechur (fuck vsync)a
+     nwindowSetSwapInterval(nwindowGetDefault(), 0);
+
 
     // Swapchain buffers
     dk::ImageLayout fbLayout;
@@ -337,38 +340,38 @@ void frdRender()
     params.u_time = getTimed();
     memcpy((uint8_t*)s_dataPool.getCpuAddr() + s_uboOffset, &params, sizeof(params));
 
-    s_cmdbuf.clear();
+    cmdbuf.clear();
 
     dk::ImageView fbView{s_framebuffers[slot]};
-    s_cmdbuf.bindRenderTargets(&fbView);
+    cmdbuf.bindRenderTargets(&fbView);
 
     DkViewport viewport{0.0f, 0.0f, (float)FB_WIDTH, (float)FB_HEIGHT};
     DkScissor  scissor{0, 0, FB_WIDTH, FB_HEIGHT};
-    s_cmdbuf.setViewports(0, viewport);
-    s_cmdbuf.setScissors(0, scissor);
+    cmdbuf.setViewports(0, viewport);
+    cmdbuf.setScissors(0, scissor);
 
-    s_cmdbuf.clearColor(0, DkColorMask_RGBA, 0.2f, 0.3f, 0.3f, 1.0f);
+    cmdbuf.clearColor(0, DkColorMask_RGBA, 0.2f, 0.3f, 0.3f, 1.0f);
 
     // Disable depth test and culling because lmao
-    s_cmdbuf.bindDepthStencilState(dk::DepthStencilState{}.setDepthTestEnable(false));
-    s_cmdbuf.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
-    s_cmdbuf.bindColorState(dk::ColorState{});
-    s_cmdbuf.bindColorWriteState(dk::ColorWriteState{});
+    cmdbuf.bindDepthStencilState(dk::DepthStencilState{}.setDepthTestEnable(false));
+    cmdbuf.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
+    cmdbuf.bindColorState(dk::ColorState{});
+    cmdbuf.bindColorWriteState(dk::ColorWriteState{});
 
-    s_cmdbuf.bindShaders(DkStageFlag_GraphicsMask, { &s_furVertexShader, &s_furFragmentShader});
-    s_cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, s_dataPool.getGpuAddr() + s_uboOffset, s_uboSize);
+    cmdbuf.bindShaders(DkStageFlag_GraphicsMask, { &s_furVertexShader, &s_furFragmentShader});
+    cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, s_dataPool.getGpuAddr() + s_uboOffset, s_uboSize);
 
     DkResHandle texHandles[3] = { s_tex1.handle, s_tex2.handle, s_tex3.handle };
-    s_cmdbuf.bindTextures(DkStage_Fragment, 0, {texHandles[0], texHandles[1], texHandles[2]});
+    cmdbuf.bindTextures(DkStage_Fragment, 0, {texHandles[0], texHandles[1], texHandles[2]});
 
     // Draw this as a triangle
-    s_cmdbuf.draw(DkPrimitive_Triangles, 3, 1, 0, 0);
+    cmdbuf.draw(DkPrimitive_Triangles, 3, 1, 0, 0);
 
     // Signal that this slot is fine to overwrite
     cmdbuf.signalFence(s_frameFences[slot]);
     s_frameFenceValid[slot] = true;
 
-    s_queue.submitCommands(s_cmdbuf.finishList());
+    s_queue.submitCommands(cmdbuf.finishList());
     s_queue.presentImage(s_swapchain, slot);
 
 
