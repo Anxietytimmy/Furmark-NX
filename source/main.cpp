@@ -255,6 +255,12 @@ int main(int argc,char* argv[]){
 
                         case MENU_EXIT:
                             goto exit_app;
+
+                        case MENU_FURMARKDK3D:
+                            consoleExit(NULL);
+                            frdSceneInit();
+                            state = STATE_FURMARK_DEKO;
+                            break;
                         
                         default:
                             break;
@@ -344,6 +350,18 @@ int main(int argc,char* argv[]){
                 } else {
                     BHRTRender();
                     eglSwapBuffers(s_display, s_surface);
+                }
+                break;
+                }
+
+            case STATE_FURMARK_DEKO: {
+                if(kDown &HidNpadButton_B){
+                    frdExit();
+                    consoleInit(NULL);
+                    drawMenu(selectedItem);
+                    state = STATE_MENU;
+                } else {
+                    frdRender(); 
                 }
                 break;
                 }
