@@ -146,7 +146,11 @@ static Texture loadTexture(const unsigned char* pngData, unsigned pngSize, int s
     stbi_image_free(img);
 
     dk::ImageView dstView{tex.image};
-    s_cmdbuf.copyBufferToImage({staging.getGpuAddr(), (uint32_t)(width * height * 4)}, dstView, {0, 0, 0, (uint32_t)width, (uint32_t)height, 1});
+    DkCopyBuf scrBuf{};
+    scrBuf.addr = staging.getGpuAddr();
+    scrBuf.rowLength = 0;
+    scrBuf.imageHeight = 0;
+    s_cmdbuf.copyBufferToImage(scrBuf, dstView, {0, 0, 0, (uint32_t)width, (uint32_t)height, 1});
     s_queue.submitCommands(s_cmdbuf.finishList());
     s_queue.waitIdle();
 
@@ -226,14 +230,18 @@ void frdSceneInit()
     s_dataPool = dk::MemBlockMaker{s_device, 1 * 1024 * 1024}
         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
         .create();
+    // Align descriptor sizes properly
+    uint32_t imageDescSize   = (3 * sizeof(dk::ImageDescriptor)   + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+    uint32_t samplerDescSize = (3 * sizeof(dk::SamplerDescriptor) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
 
-    // Directly reserve space 3 image and sampler descriptors
-    s_imageDescMemBlock = dk::MemBlockMaker{s_device, 3 * sizeof(dk::ImageDescriptor)}
+    // Directly reserve space 3 image and sampler descriptors, aligned properly this time
+    s_imageDescMemBlock = dk::MemBlockMaker{s_device, imageDescSize}
         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached).create();
-    s_samplerDescMemBlock = dk::MemBlockMaker{s_device, 3 * sizeof(dk::SamplerDescriptor)}
+    s_samplerDescMemBlock = dk::MemBlockMaker{s_device, samplerDescSize}
         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached).create();
     s_imageDescriptors   = (dk::ImageDescriptor*)s_imageDescMemBlock.getCpuAddr();
     s_samplerDescriptors = (dk::SamplerDescriptor*)s_samplerDescMemBlock.getCpuAddr();
+
 
     // Load shaders boys
     loadShader(s_furVertexShader,   s_furVshCode, "romfs:/shaders/FRDK3D_vsh.dksh");

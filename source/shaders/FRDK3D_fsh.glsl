@@ -14,7 +14,7 @@ layout (binding = 0) uniform Params
 // Texture bindings
 layout (binding = 0) uniform sampler2D u_texture1;
 layout (binding = 1) uniform sampler2D u_texture2;
-layout (binding = 2) uniform samlper2D u_texture3;
+layout (binding = 2) uniform sampler2D u_texture3;
 
 const float PI = 3.1416;
 const float TAU = 2.0 * PI;
