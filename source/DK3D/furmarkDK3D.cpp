@@ -131,6 +131,35 @@ struct Texture
 
 static Texture s_tex1, s_tex2, s_tex3;
 
+// Comp the actual sizes needed for textures instead of guessing
+static uint32_t computeImagePoolSize()
+{
+    const unsigned char* pngs[3]   = { fur_png, noise_png, wall_png };
+    unsigned              sizes[3] = { fur_png_size, noise_png_size, wall_png_size };
+
+    uint32_t total = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        int width, height, nchan;
+        // Header-only decode no pixel data.
+        stbi_info_from_memory(pngs[i], sizes[i], &width, &height, &nchan);
+
+        dk::ImageLayout layout;
+        dk::ImageLayoutMaker{s_device}
+            .setFlags(DkImageFlags_UsageLoadStore | DkImageFlags_HwCompression)
+            .setFormat(DkImageFormat_RGBA8_Unorm)
+            .setDimensions(width, height)
+            .initialize(layout);
+
+        uint32_t align  = layout.getAlignment();
+        uint32_t offset = (total + align - 1) & ~(align - 1);
+        total = offset + layout.getSize();
+    }
+    // Small headroom for alignment  between textures, rounded somewhat
+    return (total + 4095u) & ~4095u;
+
+}
+
 // Descriptor sets
 static dk::UniqueMemBlock s_imageDescMemBlock, s_samplerDescMemBlock;
 static dk::ImageDescriptor* s_imageDescriptors;
@@ -261,7 +290,7 @@ void frdSceneInit()
 
 
     // Texture and shared data pools
-    s_imagePool = dk::MemBlockMaker{s_device, 16 * 1024 * 1024}
+    s_imagePool = dk::MemBlockMaker{s_device, computeImagePoolSize()}
         .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
         .create();
     s_dataPool = dk::MemBlockMaker{s_device, 1 * 1024 * 1024}
