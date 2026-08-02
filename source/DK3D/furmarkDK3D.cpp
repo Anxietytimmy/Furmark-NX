@@ -48,8 +48,18 @@ static void deinitNxLink()
     }
 }
 
-extern "C" void userAppInit() { initNxLink(); }
-extern "C" void userAppExit() { deinitNxLink(); }
+extern "C" void userAppInit() { 
+    initNxLink(); 
+    Result rc = romfsInit();
+    if (R_FAILED(rc)) {
+        TRACE("Failed to initialize RomFS: %08X", rc);
+    }
+}
+
+extern "C" void userAppExit() { 
+    romfsExit();
+    deinitNxLink(); 
+}
 #endif
 
 // Alright boys after not having a red bull in 3 months its DK3D time
@@ -85,7 +95,7 @@ static dk::UniqueMemBlock s_furVshCode, s_furFshCode;
 static void loadShader(dk::Shader& shader, dk::UniqueMemBlock& outMemBlock, const char* path)
 {
     FILE* f = fopen(path, "rb");
-    if (!f) { TRACE("Failed to open shader %s", path); return; }
+    if (!f) { TRACE("Failed to open shader %s", path);  abort(); }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -102,6 +112,7 @@ static void loadShader(dk::Shader& shader, dk::UniqueMemBlock& outMemBlock, cons
 
     dk::ShaderMaker{outMemBlock, 0}.initialize(shader);
 }
+
 
 // Textures
 struct Texture
@@ -188,6 +199,10 @@ float getTimed()
 // I fucking love low level languages
 void frdSceneInit()
 {
+    Result rc = romfsInit();
+    if (R_FAILED(rc)) {
+        TRACE("Failed to initialize RomFS: %08X", rc);
+    }
     s_device = dk::DeviceMaker{}.create();
     s_queue = dk::QueueMaker{s_device}.setFlags(DkQueueFlags_Graphics).create();
 
