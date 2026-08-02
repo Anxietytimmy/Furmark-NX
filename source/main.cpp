@@ -24,6 +24,7 @@
 #include "CPURT.h"
 #include "CPURB.h"
 #include "BHRT.h"
+#include "DK3D/furmarkDK3D.h"
 
 
 // NX Link Support
@@ -61,6 +62,7 @@ enum MenuOption {
     MENU_CPU_RT,
     MENU_CPU_RB,
     MENU_EXIT,
+    MENU_FURMARKDK3D,
     MENU_COUNT
 };
 
@@ -77,7 +79,8 @@ static const MenuEntry s_menuEntries[MENU_COUNT] = {
     {"GPU + CPU Black Hole", 9},
     {"CPU Ray Tracing", 10},
     {"CPU RAM Stress", 11},
-    {"Exit", 12}
+    {"Exit", 12},
+    {"Furmark (Deko3D)", 13}
 };
 
 // waow
@@ -85,7 +88,7 @@ static void drawMenu(int selected) {
     consoleClear();
     printf("\x1b[1;31m");
     printf("\x1b[2;15H===============================================");
-    printf("\x1b[3;15H                Furmark-NX v0.7.0                    ");
+    printf("\x1b[3;15H                Furmark-NX v0.8.0                    ");
     printf("\x1b[4;15H===============================================");
     printf("\x1b[0m");
     
