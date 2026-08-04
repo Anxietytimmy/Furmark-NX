@@ -2,6 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <switch.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/errno.h>
+#include <unistd.h>
+
 
 #include <deko3d.hpp>
 
@@ -402,6 +407,8 @@ void frdRender()
 
     s_queue.submitCommands(cmdbuf.finishList());
     s_queue.presentImage(s_swapchain, slot);
+
+    // Timings for debug
 
 
     // OH BROTHER THIS GUY STINKS

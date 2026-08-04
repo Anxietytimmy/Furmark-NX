@@ -58,7 +58,7 @@ vec3 getNormal(vec3 p)
 float rayMarch(vec3 ro, vec3 rd)
 {
     float dist = 0.0;
-    for (int i = 0; i < 48; i++)
+    for (int i = 0; i < 32; i++)
     {
         vec3 p = ro + dist * rd;
         rotate(p);
@@ -79,7 +79,7 @@ float rayMarch(vec3 ro, vec3 rd)
         vec4 r4 = normalize(r3);
         dist += dot(r4, vec4(1e-5));
 
-        if (dist > 100.0 || abs(hit) < 0.0001) break;
+        // if (dist > 100.0 || abs(hit) < 0.0001) break;
     }
     return dist;
 }
@@ -129,15 +129,22 @@ vec3 render(vec2 offset)
     return col;
 }
 
-vec3 renderAAx4()
+vec3 renderAAx8()
 {
-    vec4 e = vec4(0.125, -0.125, 0.375, -0.375);
-    vec3 colAA = render(e.xz) + render(e.yw) + render(e.wx) + render(e.zy);
-    return colAA / 4.0;
+    vec3 colAA = vec3(0);
+    colAA += render(vec2( 0.0625, -0.1875));
+    colAA += render(vec2(-0.1875, -0.0625));
+    colAA += render(vec2( 0.1875,  0.0625));
+    colAA += render(vec2(-0.0625,  0.1875));
+    colAA += render(vec2( 0.375,  -0.125));
+    colAA += render(vec2(-0.125,  -0.375));
+    colAA += render(vec2( 0.125,   0.375));
+    colAA += render(vec2(-0.375,   0.125));
+    return colAA / 8.0;
 }
 
 void main()
 {
-    vec3 color = renderAAx4();
+    vec3 color = renderAAx8();
     fragColor = vec4(color, 1.0);
 }
