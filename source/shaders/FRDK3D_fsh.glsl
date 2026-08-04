@@ -19,11 +19,27 @@ layout (binding = 2) uniform sampler2D u_texture3;
 const float PI = 3.1416;
 const float TAU = 2.0 * PI;
 
+float acosFast(float x)
+{
+    float negate = float(x < 0.0);
+    x = abs(x);
+    float ret = -0.0187293;
+    ret = ret * x + 0.0742610;
+    ret = ret * x - 0.2121144;
+    ret = ret * x + 1.5707288;
+    ret = ret * sqrt(1.0 - x);
+    return ret - 2.0 * negate * ret + negate * 3.14159265358979;
+}
+
 float displace(vec3 p, sampler2D tex)
 {
-    float s = 4.5;
+    const float s = 4.5;
+    const float sq_s2p1 = 4.609772228646444;
     float u = s / TAU * atan(p.y / p.x);
-    float v = sign(p.z) / TAU * acos((p.z * p.z * sqrt(s * s + 1) + sqrt(1 - p.z * p.z * s *s)) / (p.z * p.z + 1));
+
+    float x = clamp((p.z * p.z * sq_s2p1 + sqrt(1.0 - p.z * p.z * s * s)) / (p.z * p.z + 1.0), -1.0, 1.0);
+    float v = sign(p.z) / TAU * acosFast(x);
+
     vec2 uv = 2.0 * vec2(u, v);
     float disp = texture(tex, uv).r;
     return disp * 0.06;
@@ -53,12 +69,13 @@ vec3 getNormal(vec3 p)
     vec2 e = vec2(0.01, 0.0);
     vec3 n = vec3(map(p)) - vec3(map(p - e.xyy), map(p - e.yxy), map(p - e.yyx));
     return normalize(n);
+    
 }
 
 float rayMarch(vec3 ro, vec3 rd)
 {
     float dist = 0.0;
-    for (int i = 0; i < 48; i++)
+    for (int i = 0; i < 32; i++)
     {
         vec3 p = ro + dist * rd;
         rotate(p);
@@ -72,12 +89,15 @@ float rayMarch(vec3 ro, vec3 rd)
         q = q * 0.91 + q.yzx * 0.09;
         dist += dot(q, q) * 1e-5;
 
-        //vec4 r0 = vec4(p, dist);
-        //vec4 r1 = sin(r0 * 3.1);
-        //vec4 r2 = cos(r1 * 2.7);
-        //vec4 r3 = r2 * r1;
-        //vec4 r4 = normalize(r3);
-        //dist += dot(r4, vec4(1e-5));
+        vec4 r0 = vec4(p, dist);
+        vec4 r1 = sin(r0 * 3.1);
+        vec4 r2 = cos(r1 * 2.7);
+        vec4 r3 = r2 * r1;
+        vec4 r4 = normalize(r3);
+        dist += dot(r4, vec4(1e-5));
+
+        vec3 sfu_stress = sin(p * 12.589) * inversesqrt(abs(p) + vec3(0.001));
+        dist += dot(sfu_stress, vec3(0.0001));
 
         if (dist > 100.0 || abs(hit) < 0.0001) break;
     }

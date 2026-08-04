@@ -491,7 +491,8 @@ void frdRender()
     cmdbuf.bindTextures(DkStage_Fragment, 0, {texHandles[0], texHandles[1], texHandles[2]});
 
     // Draw this as a triangle
-    cmdbuf.draw(DkPrimitive_Triangles, 3, 1, 0, 0);
+    static int gridIndex = 64;
+    cmdbuf.draw(DkPrimitive_Triangles, gridIndex, 1, 0, 0);
 
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
@@ -525,8 +526,6 @@ void frdRender()
 }
 void frdExit()
 {
-
-
     s_queue.waitIdle();
     s_cmdbuf.destroy();
     for (unsigned i = 0; i < NUM_FRAMEBUFFERS; i++)
@@ -545,10 +544,10 @@ void frdExit()
     s_furVshCode.destroy();
     s_furFshCode.destroy();
     s_cmdbufMemBlock.destroy();
-    s_queue.destroy();
-    s_device.destroy();
     s_textVshCode.destroy();
     s_textFshCode.destroy();
+    s_queue.destroy();
+    s_device.destroy();
 }
 int frdMain(int argc, char* argv[])
 {
