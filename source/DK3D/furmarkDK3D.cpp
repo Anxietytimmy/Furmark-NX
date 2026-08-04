@@ -104,6 +104,20 @@ static uint32_t s_imagePoolOffset = 0;
 
 static uint32_t s_uboOffsets[NUM_FRAMEBUFFERS];
 
+// Text rendering
+static dk::Shader s_textVertexShader, s_textFragmentShader;
+static dk::UniqueMemBlock s_textVshCode, s_textFshCode;
+
+struct TextVertex { float x, y, z, r, g, b;};
+
+static const int MAX_TEXT_CHARS = 16;
+static const int MAX_TEXT_VERTS = MAX_TEXT_CHARS * 64 * 6;
+static const uint32_t TEXT_VTX_BUF_SIZE = (MAX_TEXT_VERTS * sizeof(TextVertex) + 255) & ~255u;
+
+// Bind offsets to FB so we don't have random desyncs as well
+static uint32_t s_textVtxOffsets[NUM_FRAMEBUFFERS]; 
+static TextVertex s_textScratch[MAX_TEXT_VERTS];
+
 // Link shaders
 static dk::Shader s_furVertexShader, s_furFragmentShader;
 static dk::UniqueMemBlock s_furVshCode, s_furFshCode;
@@ -129,6 +143,69 @@ static void loadShader(dk::Shader& shader, dk::UniqueMemBlock& outMemBlock, cons
 
     dk::ShaderMaker{outMemBlock, 0}.initialize(shader);
 }
+
+
+// FPS counter funcs
+static const DkVtxBufferState s_textVtxBuffers[] = {
+    { sizeof(TextVertex), 0 },
+};
+
+static const unsigned char font8x8[11][8] = {
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}  // .
+};
+
+static void addTextPixel(float x, float y, float size, float r, float g, float b, int* count)
+{
+    if (*count + 6 > MAX_TEXT_VERTS) return;
+    TextVertex v[6] = {
+        { x,      y,      r, g, b },
+        { x+size, y,      r, g, b },
+        { x+size, y+size, r, g, b },
+        { x,      y,      r, g, b },
+        { x+size, y+size, r, g, b },
+        { x,      y+size, r, g, b },
+    };
+    memcpy(&s_textScratch[*count], v, sizeof(v));
+    *count += 6;
+}
+
+static void addTextChar(char c, float x, float y, float scale, float r, float g, float b, int* count)
+{
+    int idx = -1;
+    if (c >= '0' && c <= '9') idx = c - '0';
+    else if (c == '.') idx = 10;
+    else return;
+
+    const unsigned char* glyph = font8x8[idx];
+    for (int row = 0; row < 8; row++)
+        for (int col = 0; col < 8; col++)
+            if (glyph[row] & (1 << col))
+                addTextPixel(x + col * scale, y - row * scale, scale, r, g, b, count);
+}
+
+static int buildText(const char* text, float x, float y, float scale, float r, float g, float b)
+{
+    int count = 0;
+    float cx = x;
+    while (*text)
+    {
+        addTextChar(*text, cx, y, scale, r, g, b, &count);
+        cx += 8 * scale;
+        text++;
+    }
+    return count;
+}
+
 
 
 // Textures
@@ -272,7 +349,7 @@ void frdSceneInit()
     }
 
     // Da creechur (fuck vsync)a
-     nwindowSetSwapInterval(nwindowGetDefault(), 0);
+    nwindowSetSwapInterval(nwindowGetDefault(), 0);
 
 
     // Swapchain buffers
@@ -323,6 +400,8 @@ void frdSceneInit()
     // Load shaders boys
     loadShader(s_furVertexShader,   s_furVshCode, "romfs:/shaders/FRDK3D_vsh.dksh");
     loadShader(s_furFragmentShader, s_furFshCode, "romfs:/shaders/FRDK3D_fsh.dksh");
+    loadShader(s_textVertexShader, s_textVshCode, "romfs:/shaders/FPS_vsh.dksh");
+    loadShader(s_textFragmentShader, s_textFshCode, "romfs:/shaders/FPS_fsh.dksh");
 
     // Load textures
     s_tex1 = loadTexture(fur_png, fur_png_size, 0);
@@ -339,6 +418,13 @@ void frdSceneInit()
     // Reserve UBO Space
     s_uboOffset = s_dataPoolOffset;
     s_dataPoolOffset += s_uboSize;
+
+    // Text buffer reserves
+    for (unsigned i = 0; i < NUM_FRAMEBUFFERS; i++)
+    {
+        s_textVtxOffsets[i] = s_dataPoolOffset;
+        s_dataPoolOffset += TEXT_VTX_BUF_SIZE;
+    }
 
     s_startTicks = armGetSystemTick();
 
@@ -407,6 +493,26 @@ void frdRender()
     // Draw this as a triangle
     cmdbuf.draw(DkPrimitive_Triangles, 3, 1, 0, 0);
 
+    char fpsText[32];
+    snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
+    int vertCount = buildText(fpsText, -0.95f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+    memcpy((uint8_t*)s_dataPool.getCpuAddr() + s_textVtxOffsets[slot], s_textScratch, vertCount * sizeof(TextVertex));
+
+    if (vertCount > 0)
+    {
+        cmdbuf.bindShaders(DkStageFlag_GraphicsMask, { &s_textVertexShader, &s_textFragmentShader });
+        cmdbuf.bindVtxBuffer(0, s_dataPool.getGpuAddr() + s_textVtxOffsets[slot],
+                            vertCount * sizeof(TextVertex));
+        cmdbuf.bindVtxAttribState({
+            DkVtxAttribState{ 0, 0, offsetof(TextVertex, x), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0 },
+            DkVtxAttribState{ 0, 0, offsetof(TextVertex, r), DkVtxAttribSize_3x32, DkVtxAttribType_Float, 0 },
+        });
+        cmdbuf.bindVtxBufferState({
+            DkVtxBufferState{ sizeof(TextVertex), 0 },
+        });
+        cmdbuf.draw(DkPrimitive_Triangles, vertCount, 1, 0, 0);
+    }
+
     // Signal that this slot is fine to overwrite
     cmdbuf.signalFence(s_frameFences[slot]);
     s_frameFenceValid[slot] = true;
@@ -416,9 +522,6 @@ void frdRender()
 
     // Timings for debug
 
-
-    // OH BROTHER THIS GUY STINKS
-    (void)s_fps;
 }
 void frdExit()
 {
@@ -444,6 +547,8 @@ void frdExit()
     s_cmdbufMemBlock.destroy();
     s_queue.destroy();
     s_device.destroy();
+    s_textVshCode.destroy();
+    s_textFshCode.destroy();
 }
 int frdMain(int argc, char* argv[])
 {
