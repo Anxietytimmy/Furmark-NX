@@ -131,16 +131,9 @@ vec3 render(vec2 offset)
 
 vec3 renderAAx8()
 {
-    vec3 colAA = vec3(0);
-    colAA += render(vec2( 0.0625, -0.1875));
-    colAA += render(vec2(-0.1875, -0.0625));
-    colAA += render(vec2( 0.1875,  0.0625));
-    colAA += render(vec2(-0.0625,  0.1875));
-    colAA += render(vec2( 0.375,  -0.125));
-    colAA += render(vec2(-0.125,  -0.375));
-    colAA += render(vec2( 0.125,   0.375));
-    colAA += render(vec2(-0.375,   0.125));
-    return colAA / 8.0;
+    vec4 e = vec4(0.125, -0.125, 0.375, -0.375);
+    vec3 colAA = render(e.xy) + render(e.yw) + render(e.wx) + render(e.zy);
+    return colAA /= 4;
 }
 
 void main()

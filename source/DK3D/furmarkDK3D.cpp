@@ -69,7 +69,9 @@ extern "C" void userAppExit() {
 
 // Alright boys after not having a red bull in 3 months its DK3D time
 // Globals
-
+// Tripe buffer your shit becasue I was lazy and I didn't do this.
+// As a result, this ran like shit and didn't use up the GPU entirely.
+// 
 static const unsigned NUM_FRAMEBUFFERS = 3;
 static const unsigned FB_WIDTH = 1280;
 static const unsigned FB_HEIGHT = 720;
