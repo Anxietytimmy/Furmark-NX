@@ -58,7 +58,7 @@ vec3 getNormal(vec3 p)
 float rayMarch(vec3 ro, vec3 rd)
 {
     float dist = 0.0;
-    for (int i = 0; i < 32; i++)
+    for (int i = 0; i < 48; i++)
     {
         vec3 p = ro + dist * rd;
         rotate(p);
@@ -72,14 +72,14 @@ float rayMarch(vec3 ro, vec3 rd)
         q = q * 0.91 + q.yzx * 0.09;
         dist += dot(q, q) * 1e-5;
 
-        vec4 r0 = vec4(p, dist);
-        vec4 r1 = sin(r0 * 3.1);
-        vec4 r2 = cos(r1 * 2.7);
-        vec4 r3 = r2 * r1;
-        vec4 r4 = normalize(r3);
-        dist += dot(r4, vec4(1e-5));
+        //  vec4 r0 = vec4(p, dist);
+        //  vec4 r1 = sin(r0 * 3.1);
+        //  vec4 r2 = cos(r1 * 2.7);
+        //  vec4 r3 = r2 * r1;
+        //  vec4 r4 = normalize(r3);
+        //  dist += dot(r4, vec4(1e-5));
 
-        // if (dist > 100.0 || abs(hit) < 0.0001) break;
+        if (dist > 100.0 || abs(hit) < 0.0001) break;
     }
     return dist;
 }

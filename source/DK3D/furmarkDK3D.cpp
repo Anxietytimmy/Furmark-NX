@@ -70,7 +70,7 @@ extern "C" void userAppExit() {
 // Alright boys after not having a red bull in 3 months its DK3D time
 // Globals
 
-static const unsigned NUM_FRAMEBUFFERS = 2;
+static const unsigned NUM_FRAMEBUFFERS = 3;
 static const unsigned FB_WIDTH = 1280;
 static const unsigned FB_HEIGHT = 720;
 static const unsigned CMDBUF_SIZE = 256 * 1024;
@@ -88,7 +88,7 @@ static dk::UniqueMemBlock s_cmdbufMemBlock;
 static dk::UniqueCmdBuf s_renderCmdbufs[NUM_FRAMEBUFFERS];
 static dk::UniqueMemBlock s_renderCmdbufMemBlocks[NUM_FRAMEBUFFERS];
 static dk::Fence s_frameFences[NUM_FRAMEBUFFERS];
-static bool s_frameFenceValid[NUM_FRAMEBUFFERS] = { false, false };
+static bool s_frameFenceValid[NUM_FRAMEBUFFERS] = {};
 
 static dk::Image s_framebuffers[NUM_FRAMEBUFFERS];
 static dk::UniqueMemBlock s_fbMemBlock;
@@ -99,6 +99,8 @@ static dk::UniqueMemBlock s_dataPool;
 
 static uint32_t s_dataPoolOffset = 0;
 static uint32_t s_imagePoolOffset = 0;
+
+static uint32_t s_uboOffsets[NUM_FRAMEBUFFERS];
 
 // Link shaders
 static dk::Shader s_furVertexShader, s_furFragmentShader;
@@ -258,6 +260,8 @@ void frdSceneInit()
     // One command buffer per swapchain slot for the actual render loop
     for (unsigned i = 0; i < NUM_FRAMEBUFFERS; i++)
     {
+        s_uboOffsets[i] = s_dataPoolOffset;
+        s_dataPoolOffset += s_uboSize;
         s_renderCmdbufMemBlocks[i] = dk::MemBlockMaker{s_device, CMDBUF_SIZE}
             .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)
             .create();
@@ -372,7 +376,7 @@ void frdRender()
     params.u_resolution[0] = (float)FB_WIDTH;
     params.u_resolution[1] = (float)FB_HEIGHT;
     params.u_time = getTimed();
-    memcpy((uint8_t*)s_dataPool.getCpuAddr() + s_uboOffset, &params, sizeof(params));
+    memcpy((uint8_t*)s_dataPool.getCpuAddr() + s_uboOffsets[slot], &params, sizeof(params));
 
     cmdbuf.clear();
 
@@ -393,7 +397,7 @@ void frdRender()
     cmdbuf.bindColorWriteState(dk::ColorWriteState{});
 
     cmdbuf.bindShaders(DkStageFlag_GraphicsMask, { &s_furVertexShader, &s_furFragmentShader});
-    cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, s_dataPool.getGpuAddr() + s_uboOffset, s_uboSize);
+    cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, s_dataPool.getGpuAddr() + s_uboOffsets[slot], s_uboSize);
 
     DkResHandle texHandles[3] = { s_tex1.handle, s_tex2.handle, s_tex3.handle };
     cmdbuf.bindTextures(DkStage_Fragment, 0, {texHandles[0], texHandles[1], texHandles[2]});
