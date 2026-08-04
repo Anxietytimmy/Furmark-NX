@@ -292,7 +292,8 @@ static Texture loadTexture(const unsigned char* pngData, unsigned pngSize, int s
     s_imageDescriptors[slot].initialize(dstView);
     s_samplerDescriptors[slot].initialize(
         dk::Sampler{}
-            .setFilter(DkFilter_Linear, DkFilter_Linear)
+            .setFilter(DkFilter_Linear, DkFilter_Linear, DkMipFilter_Linear)
+            .setMaxAnisotropy(16.0f)
             .setWrapMode(DkWrapMode_Repeat, DkWrapMode_Repeat, DkWrapMode_Repeat)
     );
     tex.handle = dkMakeTextureHandle(slot, slot);
@@ -491,7 +492,8 @@ void frdRender()
     cmdbuf.bindTextures(DkStage_Fragment, 0, {texHandles[0], texHandles[1], texHandles[2]});
 
     // Draw this as a triangle
-    static int gridIndex = 64;
+    // Instead lets draw 128 because this draws slightly more power and thats the goal
+    static int gridIndex = 128;
     cmdbuf.draw(DkPrimitive_Triangles, gridIndex, 1, 0, 0);
 
     char fpsText[32];

@@ -75,31 +75,40 @@ vec3 getNormal(vec3 p)
 float rayMarch(vec3 ro, vec3 rd)
 {
     float dist = 0.0;
-    for (int i = 0; i < 32; i++)
+    float final_dist = 101.0;
+    float is_active = 1.0;
+    for (int i = 0; i < 48; i++)
     {
         vec3 p = ro + dist * rd;
         rotate(p);
         float hit = map(p);
-        dist += hit;
-        dist -= displace(0.5 * p, u_texture2);
+
+        float step_dist = hit;
+        step_dist -= displace(0.5 * p, u_texture2);
 
         vec3 q = p;
         q = q * 1.37 + 0.13;
         q = q * q - 0.17;
         q = q * 0.91 + q.yzx * 0.09;
-        dist += dot(q, q) * 1e-5;
+        step_dist += dot(q, q) * 1e-5;
 
         vec4 r0 = vec4(p, dist);
         vec4 r1 = sin(r0 * 3.1);
         vec4 r2 = cos(r1 * 2.7);
         vec4 r3 = r2 * r1;
         vec4 r4 = normalize(r3);
-        dist += dot(r4, vec4(1e-5));
+        step_dist += dot(r4, vec4(1e-5));
 
-        vec3 sfu_stress = sin(p * 12.589) * inversesqrt(abs(p) + vec3(0.001));
-        dist += dot(sfu_stress, vec3(0.0001));
+        float hit_surface = step(abs(hit), 0.0001);
+        float hit_far = step(100.0, dist);
 
-        if (dist > 100.0 || abs(hit) < 0.0001) break;
+        float just_finished = clamp(hit_surface + hit_far, 0.0, 1.0) * is_active;
+
+        final_dist = mix(final_dist, dist, just_finished);
+
+        // HOLY FUCK WE ARE CLOSE NOW
+        dist += mix(2.0, step_dist, is_active);
+
     }
     return dist;
 }
