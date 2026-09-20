@@ -427,6 +427,7 @@ static const char* const fragmentShaderSource = R"text(
 
             if (dist > 100.0 || abs(hit) < 0.0001) break;
         }
+            fragColor = (dist < 100.0) ? vec4(1,0,0,1) : vec4(0,0,1,1);
         return dist;
     }
 

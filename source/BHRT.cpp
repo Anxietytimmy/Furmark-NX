@@ -1624,7 +1624,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
     const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
 
     // Process 4 pixels per call
-    for (int py_idx = 0; py_idx < DEFLECT_H; py_idx++)
+    for (int py_idx = startY; py_idx < endY; py_idx++)
     for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
     {
         // Skip areas that GPU has already worked on

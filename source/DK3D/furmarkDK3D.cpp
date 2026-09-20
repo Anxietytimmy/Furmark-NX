@@ -122,6 +122,7 @@ static TextVertex s_textScratch[MAX_TEXT_VERTS];
 static dk::Shader s_furVertexShader, s_furFragmentShader;
 static dk::UniqueMemBlock s_furVshCode, s_furFshCode;
 
+
 // Generic shader loader from romfs
 static void loadShader(dk::Shader& shader, dk::UniqueMemBlock& outMemBlock, const char* path)
 {
@@ -306,7 +307,7 @@ struct FurParams
 {
     float u_resolution[2];
     float u_time;
-    float _pad;
+    float u_layerOffset;
 };
 
 static uint32_t s_uboOffset;
@@ -328,7 +329,11 @@ void frdSceneInit()
         TRACE("Failed to initialize RomFS: %08X", rc);
     }
     s_device = dk::DeviceMaker{}.create();
-    s_queue = dk::QueueMaker{s_device}.setFlags(DkQueueFlags_Graphics).create();
+    s_queue = dk::QueueMaker{s_device}
+    .setFlags(DkQueueFlags_Graphics)
+    .setCommandMemorySize(DK_QUEUE_MIN_CMDMEM_SIZE * 8)
+    .setPerWarpScratchMemorySize(DK_PER_WARP_SCRATCH_MEM_ALIGNMENT * 32)
+    .create();
 
     // CMD Buffer (only used once now)
     s_cmdbufMemBlock = dk::MemBlockMaker{s_device, CMDBUF_SIZE}
@@ -427,6 +432,12 @@ void frdSceneInit()
         s_dataPoolOffset += TEXT_VTX_BUF_SIZE;
     }
 
+        // Disable depth test and culling because lmao
+    s_cmdbuf.bindDepthStencilState(dk::DepthStencilState{}.setDepthTestEnable(false));
+    s_cmdbuf.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
+    s_cmdbuf.bindColorState(dk::ColorState{});
+    s_cmdbuf.bindColorWriteState(dk::ColorWriteState{});
+
     s_startTicks = armGetSystemTick();
 
     // Please do not use the FPS meter, I don't have an animation for it
@@ -454,8 +465,8 @@ void frdRender()
 
     // IF this slot's frame is still in use for some goddamn reason, then wait
     // We could do without this check but if a cosmic ray tells me to go fuck myself then we need this to not hang
-    if (s_frameFenceValid[slot])
-        s_frameFences[slot].wait();
+    //if (s_frameFenceValid[slot])
+    //    s_frameFences[slot].wait();
 
     dk::CmdBuf& cmdbuf = s_renderCmdbufs[slot];
 
@@ -479,11 +490,6 @@ void frdRender()
 
     cmdbuf.clearColor(0, DkColorMask_RGBA, 0.2f, 0.3f, 0.3f, 1.0f);
 
-    // Disable depth test and culling because lmao
-    cmdbuf.bindDepthStencilState(dk::DepthStencilState{}.setDepthTestEnable(false));
-    cmdbuf.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
-    cmdbuf.bindColorState(dk::ColorState{});
-    cmdbuf.bindColorWriteState(dk::ColorWriteState{});
 
     cmdbuf.bindShaders(DkStageFlag_GraphicsMask, { &s_furVertexShader, &s_furFragmentShader});
     cmdbuf.bindUniformBuffer(DkStage_Fragment, 0, s_dataPool.getGpuAddr() + s_uboOffsets[slot], s_uboSize);
@@ -493,8 +499,8 @@ void frdRender()
 
     // Draw this as a triangle
     // Instead lets draw 128 because this draws slightly more power and thats the goal
-    static int gridIndex = 128;
-    cmdbuf.draw(DkPrimitive_Triangles, gridIndex, 1, 0, 0);
+    static int gridIndex = 256;
+    cmdbuf.draw(DkPrimitive_Triangles, gridIndex,1, 0, 0);
 
     char fpsText[32];
     snprintf(fpsText, sizeof(fpsText), "%.3f", s_fps);
