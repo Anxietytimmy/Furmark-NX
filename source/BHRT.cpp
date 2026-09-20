@@ -1889,6 +1889,7 @@ static void deflectThreadFunc(int threadIdx, int coreID)
         deflectionWorkerFunc(g_uniforms[readIdx].camPos, g_uniforms[readIdx].view, s_deflectBuf[writeIdx], s_diskColorBuf[writeIdx], startY, endY);
 
         // sync and handoff
+        // amount of threads - 1, = 2 when main joins
         // Someday
         // as we cross the space and time
         if (s_threadsFinished.fetch_add(1, std::memory_order_acq_rel) == 1)
@@ -2253,13 +2254,19 @@ void BHRTRender()
     glUniform1f(loc_time, t);
     glUniform2f(resloc, RenderX, RenderY);
     // all of our days
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
-    glActiveTexture(GL_TEXTURE5);
-    // Show me the wave
-    glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
+    // Only upload data that has changed
+    if (s_deflectReady.exchange(false, std::memory_order_acquire))
+    {
+        const int rb = s_deflectReadBuf.load(std::memory_order_acquire);
+
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[rb]);
+        glActiveTexture(GL_TEXTURE5);
+        // Show me the wave
+        glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[rb]);
+    }
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
     // All the waves
