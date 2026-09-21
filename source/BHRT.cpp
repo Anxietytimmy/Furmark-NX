@@ -1467,11 +1467,23 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     float32x4_t hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
     float32x4_t h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
 
-    // Accumulate disk colors per lane
-    // We can't use neon effectively, as vertors here are a fucking pain
-    float diskR[4] = {}, diskG[4] = {}, diskB[4] = {};
-    float diskAlpha[4] = {1.f, 1.f, 1.f, 1.f};
+    // Constants that can be out of the loop
     const float innerR = 2.6f, outerR = 12.0f, thinH = 0.18f, absorption = 1.2f;
+    const float invOuter2 = 1.0f / (outerR * outerR);
+    const float invThin2 = 1.0f / (thinH * thinH);
+    const float invThin = 1.0f/ thinH;
+    const float invRadSpan = 1.0f / (outerR - innerR);
+
+    const float32x4_t v_zero = vdupq_n_f32(0.0f);
+    const float32x4_t v_one = vdupq_n_f32(1.0f);
+    const float32x4_t v_inner = vdupq_n_f32(innerR);
+    const float32x4_t v_outer = vdupq_n_f32(outerR);
+    const float32x4_t v_tiny = vdupq_n_f32(1e-12f);
+
+    // Accumulate colors in registers instead of arrays
+    // RGBA 0,0,0,1
+    float32x4_t accR = v_zero, accG = v_zero, accB = v_zero;
+    float32x4_t accA = v_one;
 
     // setup mask to determine to kill rays or not
     // 1.0 still marching, terminated
@@ -1530,55 +1542,77 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
 
         // Accumulate disk rays using the actual bent path
         {
-            float pxs[4], pys[4], pzs[4], dxs[4], dys[4], dzs[4], ss[4], als[4];
-            vst1q_f32(pxs, px); 
-            vst1q_f32(pys, py);
-            vst1q_f32(pzs, pz);
-            vst1q_f32(dxs, dx);
-            vst1q_f32(dys, dy);
-            vst1q_f32(dzs, dz);
-            vst1q_f32(ss, stepSize);
-            vst1q_f32(als, alive);
-            //I thought I'd see you again
-            for (int lane = 0; lane < 4; lane++) {
-                if (als[lane] < 0.5f || diskAlpha[lane] < 0.01f) continue;
-                float px_ = pxs[lane], py_ = pys[lane], pz_ = pzs[lane];
-                float r_xz = sqrtf(px_ * px_ + pz_ * pz_);
-                // Check density
-                float density = 1.0f - sqrtf((px_ / outerR) * (px_ / outerR) + (py_ / thinH) * (py_ / thinH) + (pz_ / outerR) * (pz_ / outerR));
-                if (density < 0.001f || r_xz < innerR || r_xz > outerR) continue;
-                // Comp disk color from radial band
-                float radT = (r_xz - innerR) / (outerR - innerR);
-                float vertFade = 1.0f - fabsf(py_) / thinH;
-                vertFade = vertFade * vertFade * vertFade * vertFade * vertFade * vertFade;
-                density *= vertFade;
-                if (density < 0.003f) continue;
-                // Doppler shift, shrimple
-                // You never did
-                float speed = fminf(0.65f / sqrtf(fmaxf(r_xz, 2.f)), 0.6f);
-                // Orbital direction
-                float vx = -pz_ / r_xz, vz = px_ / r_xz;
-                float len_d = sqrtf(dxs[lane] * dxs[lane] + dys[lane] * dys[lane] + dzs[lane] * dzs[lane]);
-                float cosT = -(dxs[lane] * vx + dzs[lane] * vz) / (len_d + 1e-8f);
-                float gamma_ = 1.0f / sqrtf(1.0f - speed * speed);
-                float doppler = 1.0f / (gamma_ * (1.0f - cosT * speed));
-                doppler = fmaxf(doppler, 0.001f);
-                float beaming = doppler * doppler * doppler * doppler;
-                float cr = (radT < 0.2f) ? (1.3f * (1.f - radT / 0.2f) + 1.0f * (radT / 0.2f)) : (1.0f * (1.f - (radT - 0.2f) / 0.8f) + 0.4f * (radT - 0.2f) / 0.8f);
-                float cg = (radT < 0.2f) ? (1.1f * (1.f - radT / 0.2f) + 0.4f * (radT / 0.2f)) : (0.4f * (1.f - (radT - 0.2f) / 0.8f) + 0.02f * (radT - 0.2f) / 0.8f);
-                float cb = (radT < 0.2f) ? (0.9f * (1.f - radT / 0.2f) + 0.05f * (radT / 0.2f)): (0.05f * (1.f - (radT - 0.2f) / 0.8f) + 0.0f * (radT - 0.2f) / 0.8f);
-                cr *= powf(doppler, 1.5f);
-                cg *= powf(doppler, 1.5f);
-                cb *= powf(doppler, 1.5f);
+            // Clamp distances in the disk so NaNs aren't here
+            float32x4_t rxz2 = vmaxq_f32(vmlaq_f32(vmulq_f32(px, px), pz, pz), v_tiny);
+            float32x4_t invRxz = fastRsqrt(rxz2);
+            float32x4_t rxz = vmulq_f32(rxz2, invRxz);
 
-                float sampleAlpha = fminf(density * ss[lane] * absorption * beaming * 0.45f, 1.0f);
-                float lit = 15.0f;
+            // Density calc, where
+            // D = 1 - sqrt((px^2 + pz^2) / outerR^2 + py^2/thinH^2); px^2+pz^2 = rxz2
+            float32x4_t s2 = vmaxq_f32(vmlaq_n_f32(vmulq_n_f32(rxz2, invOuter2), vmulq_f32(py, py), invThin2), v_tiny);
+            float32x4_t density = vsubq_f32(v_one, vmulq_f32(s2, fastRsqrt(s2)));
+
+            // vertFade^6
+            float32x4_t vf = vmaxq_f32(vsubq_f32(v_one, vmulq_n_f32(vabsq_f32(py), invThin)), v_zero);
+            float32x4_t vf2 = vmulq_f32(vf, vf);
+            float32x4_t vf3 = vmulq_f32(vf2, vf);
+            density = vmulq_f32(density, vmulq_f32(vf3, vf3));
+
+            // Continuing instead as a single lane
+            uint32x4_t m = vandq_u32(vcgeq_f32(rxz, v_inner), vcleq_f32(rxz, v_outer));
+            m = vandq_u32(m, vcgeq_f32(density, vdupq_n_f32(0.003f)));
+            m = vandq_u32(m, vcgeq_f32(accA, vdupq_n_f32(0.01f)));
+            m = vandq_u32(m, vcgeq_f32(alive, vdupq_n_f32(0.5f)));
+
+            // Skip shading quads that aren't in the disk
+            //I thought I'd see you again
+            if (vmaxvq_u32(m)) {
+                // Comp disk color from raidal bands
+                float32x4_t radT = vmulq_n_f32(vsubq_f32(rxz, v_inner), invRadSpan);
+
+                //I am sped
+                // Where S = min(0.65 / sqrt(max(rxz, 2)), 0.6)
+                float32x4_t speed = vminq_f32(vmulq_n_f32(fastRsqrt(vmaxq_f32(rxz, vdupq_n_f32(2.0f))), 0.65f), vdupq_n_f32(0.6f));
+
+                // Orbital config
+                // costT = (dx*pz - dz*px) / (rxz *  |d|)
+                float32x4_t len2d = vmlaq_f32(vmlaq_f32(vmulq_f32(dx, dx), dy, dy), dz, dz);
+                float32x4_t cosT = vmulq_f32(vsubq_f32(vmulq_f32(dx, pz), vmulq_f32(dz, px)), vmulq_f32(invRxz, fastRsqrt(len2d)));
+
+                // Doppler shift 
+                // You never did
+                // d = 1 / (gamma * (1 - cosT*speed)), 1/gamma = sqrt(1 - speed^2)
+                float32x4_t oneMinusS2 = vfmsq_f32(v_one, speed, speed);
+                float32x4_t invGamma = vmulq_f32(oneMinusS2, fastRsqrt(oneMinusS2));
+                float32x4_t denom = vfmsq_f32(v_one, cosT, speed);
+                float32x4_t doppler = vmaxq_f32(vmulq_f32(invGamma, fastRecip(denom)), vdupq_n_f32(0.001f));
+                
+                // A star is burning out
+                float32x4_t dop2 = vmulq_f32(doppler, doppler);
+                float32x4_t beaming = vmulq_f32(dop2, dop2);
+                
+                // powf(doppler, 1.5) == doppler 8 sqrt(doppler) == doppler^2 * rsqrt(doppler)
+                // Floating through
+                float32x4_t dop15 = vmulq_f32(dop2, fastRsqrt(doppler));
+
+                // Color ramp, base + slope*radT with knot at 0.2
+                uint32x4_t inr = vcltq_f32(radT, vdupq_n_f32(0.2f));
+                float32x4_t cr = vmlaq_f32(vbslq_f32(inr, vdupq_n_f32(1.30f), vdupq_n_f32(1.150f)), vbslq_f32(inr, vdupq_n_f32(-1.50f), vdupq_n_f32(-0.7500f)), radT);
+                float32x4_t cg = vmlaq_f32(vbslq_f32(inr, vdupq_n_f32(1.10f), vdupq_n_f32(0.495f)), vbslq_f32(inr, vdupq_n_f32(-3.50f), vdupq_n_f32(-0.4750f)), radT);
+                float32x4_t cb = vmlaq_f32(vbslq_f32(inr, vdupq_n_f32(0.90f), vdupq_n_f32(0.0625f)), vbslq_f32(inr, vdupq_n_f32(-4.25f), vdupq_n_f32(-0.0625f)), radT);
+
+                // Alpha
+                float32x4_t sa = vminq_f32(vmulq_n_f32(vmulq_f32(vmulq_f32(density, stepSize), beaming), absorption * 0.45f), v_one);
+
+                // w = lit * sa * da * beaming * doppler^1.5
+                float32x4_t w = vmulq_f32(vmulq_n_f32(sa, 15.0f), vmulq_f32(vmulq_f32(accA, beaming), dop15));
+
                 // write back
                 // Still asleep someplace new
-                diskR[lane] += cr * lit * sampleAlpha * diskAlpha[lane] * beaming;
-                diskG[lane] += cg * lit * sampleAlpha * diskAlpha[lane] * beaming;
-                diskB[lane] += cb * lit * sampleAlpha * diskAlpha[lane] * beaming;
-                diskAlpha[lane] *= (1.0f - sampleAlpha);
+                accR = vaddq_f32(accR, vbslq_f32(m, vmulq_f32(cr, w), v_zero));
+                accG = vaddq_f32(accG, vbslq_f32(m, vmulq_f32(cg, w), v_zero));
+                accB = vaddq_f32(accB, vbslq_f32(m, vmulq_f32(cb, w), v_zero));
+                accA = vmulq_f32(accA, vsubq_f32(v_one, vbslq_f32(m, sa, v_zero)));
             }
         }
 
@@ -1602,10 +1636,10 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     vst1q_f32(outW, exitW);
 
     // Write accumulated color
-    outDR[0] = diskR[0]; outDR[1] = diskR[1]; outDR[2] = diskR[2]; outDR[3] = diskR[3];
-    outDG[0] = diskG[0]; outDG[1] = diskG[1]; outDG[2] = diskG[2]; outDG[3] = diskG[3];
-    outDB[0] = diskB[0]; outDB[1] = diskB[1]; outDB[2] = diskB[2]; outDB[3] = diskB[3];
-    outDA[0] = diskAlpha[0]; outDA[1] = diskAlpha[1]; outDA[2] = diskAlpha[2]; outDA[3] = diskAlpha[3];
+    vst1q_f32(outDR, accR);
+    vst1q_f32(outDG, accG);
+    vst1q_f32(outDB, accB);
+    vst1q_f32(outDA, accA);
 
 
 }
