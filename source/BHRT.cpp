@@ -2312,11 +2312,11 @@ void BHRTRender()
             s_traceInFlight.store(true, std::memory_order_release);
 
             s_targetFrame.fetch_add(1, std::memory_order_release);
-
-            // Start CPU counter
-            CPU_FPS_Start();
         }
     }
+
+    // Start CPU counter
+    CPU_FPS_Start();
 
     // Notify 
     // All of my life
