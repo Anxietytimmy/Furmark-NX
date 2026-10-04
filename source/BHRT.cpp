@@ -1159,19 +1159,28 @@ static GLint s_deflectionTexLoc;
 // Disk color for CPU trace
 static GLuint s_diskColorTex;
 static GLint s_diskColorTexLoc;
-alignas(64) static float s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
+alignas(64) static __fp16 s_diskColorBuf[2][DEFLECT_W * DEFLECT_H * 4];
 
 // speaking of which
 // Thread variables for CPU, as the 160x90 field runs on the CPU
 static std::thread s_deflectThreads[2];
 static std::atomic<uint32_t> s_targetFrame{0};
 static std::atomic<int> s_threadsFinished{0};
+
+// Scheduler
+static const int TILE_ROWS = 6;
+static const int TILE_COUNT = DEFLECT_H / TILE_ROWS;
+alignas(64) static std::atomic<int> s_tileCursor{TILE_COUNT};
+alignas(64) static std::atomic<int> s_tilesDone{0};
+alignas(64) static std::atomic<bool> s_traceInFlight{false};
+
+
 // CPU Side FPS Counter
 static std::chrono::time_point<std::chrono::high_resolution_clock> s_frameStartTime;
 static std::atomic<float> s_currentCpuFps{0.0f};
 static std::atomic<float> s_lastCpuLatencyMs{0.0f};
 
-alignas(64) static float s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
+alignas(64) static __fp16 s_deflectBuf[2][DEFLECT_W * DEFLECT_H * 4];
 static std::atomic<int> s_deflectReadBuf{0};
 static std::atomic<bool> s_deflectReady{true};
 
@@ -1501,8 +1510,7 @@ static inline void escapeTail(float32x4_t px, float32x4_t py, float32x4_t pz, fl
 // fuck me its RT time
 // Trace 4 rays, also outputs a texture
 // This accumulates over a curved path, since before we were tracing straight rays on a curved surface
-static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, float* outX, float* outY, float* outZ, float* outW, float* outDR, float* outDG, float* outDB, float* outDA, float dither)
-{
+static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float32x4_t dy, float32x4_t dz, __fp16* __restrict deflectOut, __fp16* __restrict diskOut, float dither) {
     float32x4_t px = vdupq_n_f32(cpx);
     float32x4_t py = vdupq_n_f32(cpy);
     float32x4_t pz = vdupq_n_f32(cpz);
@@ -1689,25 +1697,22 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
     float32x4_t rlen = vrsqrteq_f32(len2);
     rlen = vmulq_f32(rlen, vrsqrtsq_f32(vmulq_f32(len2, rlen), rlen));
 
-    vst1q_f32(outX, vmulq_f32(dx, rlen));
-    vst1q_f32(outY, vmulq_f32(dy, rlen));
-    vst1q_f32(outZ, vmulq_f32(dz, rlen));
     // if exit, 1, else 0 if BH
     uint32x4_t wasBH  = vcgtq_f32(hitBH, vdupq_n_f32(0.0f));
     float32x4_t exitW = vreinterpretq_f32_u32( vbicq_u32(vdupq_n_u32(0x3F800000u), wasBH));
-    vst1q_f32(outW, exitW);
 
-    // Write accumulated color
-    vst1q_f32(outDR, accR);
-    vst1q_f32(outDG, accG);
-    vst1q_f32(outDB, accB);
-    vst1q_f32(outDA, accA);
 
+    // convert to half precision then write to RGBA
+    float16x4x4_t dOut = {{ vcvt_f16_f32(vmulq_f32(dx, rlen)), vcvt_f16_f32(vmulq_f32(dy, rlen)), vcvt_f16_f32(vmulq_f32(dz, rlen)), vcvt_f16_f32(exitW) }};
+    vst4_f16(deflectOut, dOut);
+
+    float16x4x4_t cOut = {{ vcvt_f16_f32(accR), vcvt_f16_f32(accG), vcvt_f16_f32(accB), vcvt_f16_f32(accA) }};
+    vst4_f16(diskOut, cOut);
 
 }
 
 // Deflection map creation
-static void deflectionWorkerFunc(const float camPos[3], const float view[9], float* deflectBuf, float* diskBuf, int startY, int endY)
+static void deflectionWorkerFunc(const float camPos[3], const float view[9], __fp16* deflectBuf, __fp16* diskBuf, int startY, int endY)
 {
 
     // Precomp photon-sphere limits as to not process anything already done by the GPU
@@ -1718,7 +1723,7 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
     float overlapRadius = photonRadiusW * 0.85f;
     float photonRadiusSqW = photonRadiusW * overlapRadius;
     const float aspectW = float(DEFLECT_W) / float(DEFLECT_H);
-
+    const float16x4_t zeroH = vreinterpret_f16_u16(vdup_n_u16(0));
     // Process 4 pixels per call
     for (int py_idx = startY; py_idx < endY; py_idx++)
     for (int px_idx = 0; px_idx < DEFLECT_W; px_idx += 4)
@@ -1727,23 +1732,15 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
         float cv = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
         float cu = ((px_idx + 2.0f) / DEFLECT_W - 0.5f) * aspectW;
 
+        int base = (py_idx * DEFLECT_W + px_idx) * 4;
+
         if (cu * cu + cv * cv <= photonRadiusSqW)
         {
-            int base = (py_idx * DEFLECT_W + px_idx) * 4;
-            // Write zeros as init
-            for (int k = 0; k < 4; k++)
+            for (int k = 0; k < 16; k+= 4)
             {
-                deflectBuf[base + k*4 + 0] = 0.0f;
-                deflectBuf[base + k*4 + 1] = 0.0f;
-                deflectBuf[base + k*4 + 2] = 0.0f;
-                deflectBuf[base + k*4 + 3] = 0.0f;
-
-                diskBuf[base + k*4 + 0] = 0.0f;
-                diskBuf[base + k*4 + 1] = 0.0f;
-                diskBuf[base + k*4 + 2] = 0.0f;
-                diskBuf[base + k*4 + 3] = 0.0f;
+                vst1_f16(&deflectBuf[base + k], zeroH);
+                vst1_f16(&diskBuf[base + k], zeroH);
             }
-
             continue;
         }
 
@@ -1769,18 +1766,16 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
 
         for (int k = 0; k < 4; k++)
         {
-            // Local directions in camera space
-            float lx = uv[k][0] * fov;
-            float ly = uv[k][1] * fov;
+            float u = (((px_idx + k + 0.5f) / DEFLECT_W) - 0.5f) * aspectW;
+            float v = (py_idx + 0.5f) / DEFLECT_H - 0.5f;
+
+            float lx = -u * fov;
+            float ly = v * fov;
             float lz = 1.0f;
 
             float len = sqrtf(lx * lx + ly * ly + lz * lz);
-            
-            lx /= len;
-            ly /= len;
-            lz /= len;
+            lx /= len; ly /= len; lz /= len;
 
-            // apply transforms
             ldx[k] = view[0]*lx + view[3]*ly + view[6]*lz;
             ldy[k] = view[1]*lx + view[4]*ly + view[7]*lz;
             ldz[k] = view[2]*lx + view[5]*ly + view[8]*lz;
@@ -1792,29 +1787,12 @@ static void deflectionWorkerFunc(const float camPos[3], const float view[9], flo
 
         float dither = float(((px_idx * 73) + (py_idx * 101)) % 256) / 255.0f;
 
-        float outX[4], outY[4], outZ[4], outW[4];
-        float outDR[4], outDG[4], outDB[4], outDA[4];
 
         // Call this downer of a function, what the actual fuck was I smoking
-        traceDeflect4(camPos[0], camPos[1], camPos[2], dx4, dy4, dz4, outX, outY, outZ, outW, outDR, outDG, outDB, outDA, dither);
-
-        int base = (py_idx * DEFLECT_W + px_idx) * 4;
+        traceDeflect4(camPos[0], camPos[1], camPos[2], vld1q_f32(ldx), vld1q_f32(ldy), vld1q_f32(ldz), &deflectBuf[base], &diskBuf[base], dither);
 
         // Hello my fellow at most .5% of the population that stil has a sole
         // It is I, that one guy that thought copy and pasting libraries into shaders was funny
-        for (int k = 0; k < 4; k++)
-        {
-            // Write RGBA data back
-            deflectBuf[base + k*4 + 0] = outX[k];
-            deflectBuf[base + k*4 + 1] = outY[k];
-            deflectBuf[base + k*4 + 2] = outZ[k];
-            deflectBuf[base + k*4 + 3] = outW[k];
-
-            diskBuf[base + k*4 + 0] = outDR[k];
-            diskBuf[base + k*4 + 1] = outDG[k];
-            diskBuf[base + k*4 + 2] = outDB[k];
-            diskBuf[base + k*4 + 3] = outDA[k];
-        }
     }
 }
 
@@ -1948,11 +1926,34 @@ static void initTrace()
 
 }
 
+// Theres a man, hes waiting in a house
+// Where theres an open door but no way out
+static void traceTiles(int readIdx, int writeIdx)
+{
+    for (;;)
+    {
+        int t = s_tileCursor.fetch_add(1, std::memory_order_relaxed);
+        if (t >= TILE_COUNT) break;
+
+        deflectionWorkerFunc(g_uniforms[readIdx].camPos, g_uniforms[readIdx].view, s_deflectBuf[writeIdx], s_diskColorBuf[writeIdx], t * TILE_ROWS, (t + 1) * TILE_ROWS);
+
+        // Whatever finishes the last tile hands the frame into the CPu
+        if (s_tilesDone.fetch_add(1, std::memory_order_acq_rel) == TILE_COUNT -1)
+        {
+            CPU_FPS_End();
+            s_deflectReadBuf.store(writeIdx, std::memory_order_release);
+            s_deflectReady.store(true, std::memory_order_release);
+            s_traceInFlight.store(false, std::memory_order_release);
+        }
+    }
+}
+
+
 // When I wake up, Im afraid
 // Somebody else will take my place
 
 // Worker thread for tracer
-static void deflectThreadFunc(int threadIdx, int coreID)
+static void deflectThreadFunc(int coreID)
 {
     // Pin thread to core 1/2
     pinThread(coreID);
@@ -1975,33 +1976,20 @@ static void deflectThreadFunc(int threadIdx, int coreID)
         int readIdx = g_uniformWriteIdx.load(std::memory_order_acquire);
         int writeIdx = s_deflectReadBuf.load(std::memory_order_acquire) ^ 1;
 
-        // Split the screen horizontally, then assign work accordingly
-        int halfHeight = DEFLECT_H / 2;
-        int startY = halfHeight * threadIdx;
-        int endY = startY + halfHeight;
+
 
         // Will I ever see you again?
-        // Start CPU
-        deflectionWorkerFunc(g_uniforms[readIdx].camPos, g_uniforms[readIdx].view, s_deflectBuf[writeIdx], s_diskColorBuf[writeIdx], startY, endY);
 
-        // sync and handoff
-        // amount of threads - 1, = 2 when main joins
         // Someday
         // as we cross the space and time
-        if (s_threadsFinished.fetch_add(1, std::memory_order_acq_rel) == 1)
-        {
-            // Stop FPS timer
-            CPU_FPS_End();
 
-            // Just stay with me
-            // GPU handoff
-            s_deflectReadBuf.store(writeIdx, std::memory_order_release);
-            s_deflectReady.store(true, std::memory_order_release);
 
-            // Reset finished flag for the next frame
-            s_threadsFinished.store(0, std::memory_order_release);
-            // I think about you all the time.
-        }
+        // Just stay with me
+
+        // I think about you all the time.
+
+        // Pull tiles dynamically instead
+        traceTiles(readIdx, writeIdx);
     }
 
 }
@@ -2092,7 +2080,7 @@ void BHRTSceneInit()
 
     glGenTextures(1, &s_deflectionTex);
     glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_deflectBuf[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_HALF_FLOAT, s_deflectBuf[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2102,9 +2090,9 @@ void BHRTSceneInit()
     glUseProgram(s_program);
 
     // Launch CPU1
-    s_deflectThreads[0] = std::thread(deflectThreadFunc, 0, 1);
+    s_deflectThreads[0] = std::thread(deflectThreadFunc, 1);
     // Launch CPU2
-    s_deflectThreads[1] = std::thread(deflectThreadFunc, 1, 2);
+    s_deflectThreads[1] = std::thread(deflectThreadFunc, 2);
 
     loc_camPos = glGetUniformLocation(s_program, "camPos");
     loc_view = glGetUniformLocation(s_program, "view");
@@ -2129,7 +2117,7 @@ void BHRTSceneInit()
     glGenTextures(1, &s_diskColorTex);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_FLOAT, s_diskColorBuf[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, DEFLECT_W, DEFLECT_H, 0, GL_RGBA, GL_HALF_FLOAT, s_diskColorBuf[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2307,19 +2295,28 @@ void BHRTRender()
     float camDist = sqrtf(camPos[0]*camPos[0] + camPos[1]*camPos[1] + camPos[2]*camPos[2]);
     float photonRadius = 12.0f / camDist; // shrinks as camera pulls back
 
-    // Write shit for CPU
+    // Write shit for CPU only if a previous trace has finished
+    if (!s_traceInFlight.load(std::memory_order_acquire))
     {
-        std::lock_guard<std::mutex> lk(workMutex); 
-        int wi = g_uniformWriteIdx.load(std::memory_order_acquire) ^ 1;
-        memcpy(g_uniforms[wi].camPos, camPos, sizeof(camPos));
-        memcpy(g_uniforms[wi].view, view, sizeof(view));
-        
-        g_uniformWriteIdx.store(wi, std::memory_order_release);
-        s_targetFrame.fetch_add(1, std::memory_order_release);
-    }
+        {
+            std::lock_guard<std::mutex> lk(workMutex); 
+            int wi = g_uniformWriteIdx.load(std::memory_order_acquire) ^ 1;
+            memcpy(g_uniforms[wi].camPos, camPos, sizeof(camPos));
+            memcpy(g_uniforms[wi].view, view, sizeof(view));
+            
+            g_uniformWriteIdx.store(wi, std::memory_order_release);
 
-    // Start CPU counter
-    CPU_FPS_Start();
+            // Setup tile scheduler for this frame
+            s_tilesDone.store(0, std::memory_order_relaxed);
+            s_tileCursor.store(0, std::memory_order_relaxed);
+            s_traceInFlight.store(true, std::memory_order_release);
+
+            s_targetFrame.fetch_add(1, std::memory_order_release);
+
+            // Start CPU counter
+            CPU_FPS_Start();
+        }
+    }
 
     // Notify 
     // All of my life
@@ -2357,11 +2354,11 @@ void BHRTRender()
 
         glActiveTexture(GL_TEXTURE4);
         glBindTexture(GL_TEXTURE_2D, s_deflectionTex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_deflectBuf[rb]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_HALF_FLOAT, s_deflectBuf[rb]);
         glActiveTexture(GL_TEXTURE5);
         // Show me the wave
         glBindTexture(GL_TEXTURE_2D, s_diskColorTex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_FLOAT, s_diskColorBuf[rb]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DEFLECT_W, DEFLECT_H, GL_RGBA, GL_HALF_FLOAT, s_diskColorBuf[rb]);
     }
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -2432,6 +2429,14 @@ void BHRTRender()
     char CPUFPS[64];
     snprintf(CPUFPS, sizeof(CPUFPS), "%.3f", s_currentCpuFps.load(std::memory_order_acquire));
     drawText(CPUFPS, 0.00f, 0.90f, 0.02f, 1.0f, 0.0f, 0.0f);
+
+    // Make sure main joins the render pool after all GPU related setups are done
+    if (s_traceInFlight.load(std::memory_order_acquire))
+    {
+        int readIdx = g_uniformWriteIdx.load(std::memory_order_acquire);
+        int writeIdx = s_deflectReadBuf.load(std::memory_order_acquire) ^ 1;
+        traceTiles(readIdx, writeIdx);
+    }
 
     // flip for next frame
     s_frameIndex ^= 1;
