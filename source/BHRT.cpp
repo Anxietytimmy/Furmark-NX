@@ -950,7 +950,7 @@ static const char* const fragmentShaderSource = R"text(
             vec3 acc = accel(h2, pos) * stepSize;
             dir += acc;
             h = cross(pos, dir);
-            h2 = dot(h, h);
+            // h2 = dot(h, h);
 
             if (dot(pos, pos) < 1.0) return color;
 
@@ -1452,6 +1452,52 @@ static inline float32x4x3_t neon_accel(float32x4_t h2, float32x4_t px, float32x4
     return result;
 }
 
+// God kill me
+// Set rays that move past this value as done
+static const float ESCAPE_R2 = 13.0f * 13.0f;
+
+// If a ray is already moving outwards, make sure that bent ones can continue onto a straight line
+// small speedup plus makes stars not have dementia between GPU/CPU. I need meds
+static inline void escapeTail(float32x4_t px, float32x4_t py, float32x4_t pz, float32x4_t& dx, float32x4_t& dy, float32x4_t& dz, uint32x4_t apply)
+{
+    // n = d |d|
+    float32x4_t L2 = vmlaq_f32(vmlaq_f32(vmulq_f32(dx, dx), dy, dy), dz, dz);
+    float32x4_t invL = fastRsqrt(L2);
+    float32x4_t nx = vmulq_f32(dx, invL), ny = vmulq_f32(dy, invL), nz = vmulq_f32(dz, invL);
+
+    // r0 = |p|, t0 = p. (Rays have already moved past the closest approach)
+    float32x4_t r02 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
+    float32x4_t invR0 = fastRsqrt(r02);
+    float32x4_t r0 = vmulq_f32(r02, invR0);
+    float32x4_t t0 = vmlaq_f32(vmlaq_f32(vmulq_f32(px, nx), py, ny), pz, nz);
+
+    // h2 = |p x d|^2
+    float32x4_t hx = vsubq_f32(vmulq_f32(py, dz), vmulq_f32(pz, dz));
+    float32x4_t hy = vsubq_f32(vmulq_f32(pz, dx), vmulq_f32(px, dz));
+    float32x4_t hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
+    float32x4_t h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
+
+    // q = perpendicular offset for p from origin line through n
+    float32x4_t qx = vmlsq_f32(px, t0, nx), qy = vmlsq_f32(py, t0, ny), qz = vmlsq_f32(pz, t0, nz);
+
+    // kq = (2*r0 + t0) / (r0 + t0)^2 (integral but it didn't go through twitter)
+    float32x4_t rpt = vaddq_f32(r0, t0);
+    float32x4_t kq = vmulq_f32(vmlaq_n_f32(t0, r0, 2.0f), fastRecip(vmulq_f32(rpt, rpt)));
+
+    // s = -0.5 * h2 / (|d| * r0^3)
+    float32x4_t invR03 = vmulq_f32(invR0, vmulq_f32(invR0, invR0));
+    float32x4_t s = vmulq_n_f32(vmulq_f32(vmulq_f32(h2, invL), invR03), -0.5f);
+
+    // dd = s * (q*kq + n), if lanes need it
+    float32x4_t ddx = vmulq_f32(s, vmlaq_f32(nx, qx, kq));
+    float32x4_t ddy = vmulq_f32(s, vmlaq_f32(ny, qy, kq));
+    float32x4_t ddz = vmulq_f32(s, vmlaq_f32(nz, qz, kq));
+    const float32x4_t z = vdupq_n_f32(0.0f);
+    dx = vaddq_f32(dx, vbslq_f32(apply, ddx, z));
+    dy = vaddq_f32(dy, vbslq_f32(apply, ddy, z));
+    dz = vaddq_f32(dz, vbslq_f32(apply, ddz, z));
+}
+
 // fuck me its RT time
 // Trace 4 rays, also outputs a texture
 // This accumulates over a curved path, since before we were tracing straight rays on a curved surface
@@ -1516,15 +1562,12 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
 
         // Lensing
         float32x4x3_t acc = neon_accel(h2, px, py, pz);
-        dx = vaddq_f32(dx, vmulq_f32(acc.val[0], stepSize));
-        dy = vaddq_f32(dy, vmulq_f32(acc.val[1], stepSize));
-        dz = vaddq_f32(dz, vmulq_f32(acc.val[2], stepSize));
-
-        // Update H2
-        hx = vsubq_f32(vmulq_f32(py, dz), vmulq_f32(pz, dy));
-        hy = vsubq_f32(vmulq_f32(pz, dx), vmulq_f32(px, dz));
-        hz = vsubq_f32(vmulq_f32(px, dy), vmulq_f32(py, dx));
-        h2 = vmlaq_f32(vmlaq_f32(vmulq_f32(hx, hx), hy, hy), hz, hz);
+        // Another world
+        // If rays are dead, stop calcuating bends
+        float32x4_t bendStep = vmulq_f32(stepSize, alive);
+        dx = vaddq_f32(dx, vmulq_f32(acc.val[0], bendStep));
+        dy = vaddq_f32(dy, vmulq_f32(acc.val[1], bendStep));
+        dz = vaddq_f32(dz, vmulq_f32(acc.val[2], bendStep));
 
         // Check for event horizon (ie if r2 <1)
         uint32x4_t insideEH = vcltq_f32(r2, vdupq_n_f32(1.0f));
@@ -1539,6 +1582,17 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
         px = vaddq_f32(px, vmulq_f32(vmulq_f32(dx, stepSize), alive));
         py = vaddq_f32(py, vmulq_f32(vmulq_f32(dy, stepSize), alive));
         pz = vaddq_f32(pz, vmulq_f32(vmulq_f32(dz, stepSize), alive));
+
+        // Once rays aren't in the disc, send them to the astral plane
+        {
+            float32x4_t r2n = vmlaq_f32(vmlaq_f32(vmulq_f32(px, px), py, py), pz, pz);
+            float32x4_t rdotd = vmlaq_f32(vmlaq_f32(vmulq_f32(px, dx), py, dy), pz, dz);
+            uint32x4_t escaped = vandq_u32(vcgtq_f32(r2n, vdupq_n_f32(ESCAPE_R2)), vcgtq_f32(rdotd, vdupq_n_f32(0.0f))); 
+            escaped = vandq_u32(escaped, vcgtq_f32(alive, vdupq_n_f32(0.5f)));
+            if (vmaxvq_u32(escaped))
+                escapeTail(px, py, pz, dx, dy, dz, escaped);
+            alive = vreinterpretq_f32_u32(vbicq_u32(vreinterpretq_u32_f32(alive), escaped));
+        }
 
         // Accumulate disk rays using the actual bent path
         {
@@ -1620,6 +1674,14 @@ static void traceDeflect4(float cpx, float cpy, float cpz, float32x4_t dx, float
         // If 4 rays are dead, exit
         if (vmaxvq_u32(vreinterpretq_u32_f32(alive)) == 0)
             break;
+    }
+
+    // rays that run out of steps and still fucking flying, give them tails
+    {
+        float32x4_t rdotd = vmlaq_f32(vmlaq_f32(vmulq_f32(px, dx), py, dy), pz, dz);
+        uint32x4_t flying = vandq_u32(vcgtq_f32(alive, vdupq_n_f32(0.5f)), vcgtq_f32(rdotd, vdupq_n_f32(0.0f)));
+        if (vmaxvq_u32(flying)) 
+            escapeTail(px, py, pz, dx, dy, dz, flying);
     }
 
     // normalize exit directions
